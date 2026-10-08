@@ -134,7 +134,7 @@ def render(grid, path, cell=CELL):
             if value == WALL:
                 draw.rectangle(box, fill="black")
             elif isinstance(value, dict):
-                draw.rectangle(box, fill=RGB[value["color"]], outline="#cccccc")
+                draw.rectangle(box, fill=RGB[value["color"]])
                 pad, width = cell // 6, max(2, cell // 10)
                 inner = (box[0] + pad, box[1] + pad, box[2] - pad, box[3] - pad)
                 # Draw each marker twice: a wider white stroke underneath gives the black
@@ -153,8 +153,7 @@ def render(grid, path, cell=CELL):
                     draw.ellipse(outer, outline="white", width=width + 2 * halo)
                     draw.ellipse(inner, outline="black", width=width)
             else:
-                # Grey outline keeps adjacent white squares distinguishable.
-                draw.rectangle(box, fill=RGB[value], outline="#cccccc")
+                draw.rectangle(box, fill=RGB[value])
     img.save(path)
 
 

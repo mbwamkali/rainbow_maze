@@ -25,18 +25,22 @@ const COLOR_HINTS = {
 
 let current = null;
 let player = null; // [row, col]
+let playerColor = "WHITE";
+let flashOn = true;
 let moves = 0;
 let solved = false;
 let cellSize = 0;
 
-sizeInput.min = MIN_SIZE;
 sizeInput.max = MAX_SIZE;
 colorsInput.max = MAX_COLORS;
-document.getElementById("size-range").textContent = `${MIN_SIZE}–${MAX_SIZE}`;
 
+// Each color needs room for its own region, so the minimum size follows the color count.
 function updateHint() {
-  colorsHint.textContent = COLOR_HINTS[colorsInput.value] || "";
+  const minSize = MIN_SIZE_FOR_COLORS[colorsInput.value];
+  colorsHint.textContent = `${COLOR_HINTS[colorsInput.value] || ""} · needs a size of at least ${minSize}`;
   document.getElementById("colors-value").textContent = colorsInput.value;
+  sizeInput.min = minSize;
+  document.getElementById("size-range").textContent = `${minSize}–${MAX_SIZE}`;
 }
 colorsInput.addEventListener("input", updateHint);
 updateHint();
@@ -52,13 +56,14 @@ function generate() {
   }
   error.textContent = "";
   player = corners(size)[0];
+  playerColor = "WHITE";
   moves = 0;
   solved = false;
   updateMoves();
   draw();
-  const used = [...new Set(current.grid.flat().map(colorOf))].filter((v) => v !== WALL);
+  // Colors in the order the regions come, from start to end.
   info.innerHTML = "";
-  for (const name of used.sort()) {
+  for (const name of current.palette) {
     const chip = document.createElement("span");
     chip.className = "chip";
     chip.innerHTML = `<i style="background:${RGB[name]}"></i>${name.toLowerCase()}`;
@@ -77,13 +82,24 @@ function draw() {
   const size = current.grid.length;
   const room = Math.min(mazeScreen.clientWidth - 32, window.innerHeight - 160);
   cellSize = Math.max(2, Math.floor(room / size));
-  render(current.grid, canvas, cellSize);
-  drawPlayer(canvas.getContext("2d"), ...player, cellSize);
+  render(current.grid, canvas, cellSize, flashOn);
+  drawPlayer(canvas.getContext("2d"), ...player, cellSize, playerColor);
 }
 
 function updateMoves() {
-  movesLabel.textContent = `Moves: ${moves}`;
+  movesLabel.textContent = `Moves: ${moves} · You are ${playerColor.toLowerCase()}`;
 }
+
+// Blink the changers by redrawing just those squares (and the player if on one).
+setInterval(() => {
+  if (!current || mazeScreen.hidden) return;
+  flashOn = !flashOn;
+  const ctx = canvas.getContext("2d");
+  for (const [r, c] of current.changers) {
+    drawCell(ctx, current.grid[r][c], r, c, cellSize, flashOn);
+    if (r === player[0] && c === player[1]) drawPlayer(ctx, r, c, cellSize, playerColor);
+  }
+}, 400);
 
 const DIRECTIONS = {
   ArrowUp: [-1, 0],
@@ -92,17 +108,21 @@ const DIRECTIONS = {
   ArrowRight: [0, 1],
 };
 
-// Step one square if it isn't a wall; only the two affected squares are redrawn.
+// Step one square if the player's color allows it; only the two affected squares
+// are redrawn. Stepping on a changer takes on its color.
 function move([dr, dc]) {
   const [r, c] = player;
   const nr = r + dr;
   const nc = c + dc;
   const grid = current.grid;
-  if (nr < 0 || nr >= grid.length || nc < 0 || nc >= grid.length || grid[nr][nc] === WALL) return;
+  if (nr < 0 || nr >= grid.length || nc < 0 || nc >= grid.length) return;
+  const target = grid[nr][nc];
+  if (target === WALL || !canEnter(playerColor, colorOf(target))) return;
   const ctx = canvas.getContext("2d");
-  drawCell(ctx, grid[r][c], r, c, cellSize);
+  drawCell(ctx, grid[r][c], r, c, cellSize, flashOn);
   player = [nr, nc];
-  drawPlayer(ctx, nr, nc, cellSize);
+  if (target.changer) playerColor = target.changer;
+  drawPlayer(ctx, nr, nc, cellSize, playerColor);
   moves++;
   updateMoves();
   if (grid[nr][nc].marker === END) {
