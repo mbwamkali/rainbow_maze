@@ -6,22 +6,25 @@
 // - A player can always walk on WHITE squares. A colored player can also walk on
 //   any color made only of their own primaries: RED walks on red; MAGENTA
 //   (red + blue) walks on magenta, red and blue, but not green.
-// - Flashing color blocks (changers) set the player's color. The new color
-//   replaces the old one. Because a new color can't walk back over the old
-//   region, each changer is the one doorway from its region into the next,
-//   placed far from where the player enters that region.
-//   TODO(expert mode): mix instead of replace (red + blue block = magenta).
-// - Each non-white color is one connected region, and every color must be
-//   used to finish.
-// - Ignoring colors, there are exactly floor(log10(size × size)) routes from start
-//   to end (just one for a single-color maze). Following the color rules, there
-//   is exactly one. A route never visits the same square twice.
+// - COLOR_CHANGE squares are the doorways between regions, placed far from
+//   where the player enters a region. Anyone can step onto one (keeping their
+//   color while on it), and step off it onto any square, in any direction,
+//   taking on that square's color. The new color replaces the old one.
+//   TODO(expert mode): mix instead of replace (red + blue = magenta).
+// - Each non-white color is one connected region, and the player must become
+//   every color to finish.
+// - Each pair of neighboring regions touches in exactly floor(log10(size × size))
+//   places: one COLOR_CHANGE doorway, and openings that the color rules block.
+//   So there are several ways between two colors, but following the color
+//   rules there is exactly one route through the maze. A route never visits
+//   the same square twice.
 
 const WALL = "WALL";
-// Special squares keep their region color and carry extra fields:
-//   {color: "WHITE", marker: "START"}   start, drawn as an X
-//   {color: "BLUE", marker: "END"}      end, drawn as a circle
-//   {color: "RED", changer: "MAGENTA"}  flashing doorway that turns the player magenta
+// Flashes between the colors of the squares it touches.
+const COLOR_CHANGE = "COLOR_CHANGE";
+// Start and end keep their region color and carry a marker:
+//   {color: "WHITE", marker: "START"}   drawn as an X
+//   {color: "BLUE", marker: "END"}      drawn as a circle
 const START = "START";
 const END = "END";
 
@@ -60,18 +63,41 @@ function shuffle(items) {
   return pool;
 }
 
-// Choose `count` colors: white first, then primaries, then secondaries, picked at random.
+// Choose the first `count` colors of this sequence:
+//   1. white
+//   2. red (P1)
+//   3. a secondary containing P1 (S1)
+//   4. the other primary in S1 (P2)
+//   5. the last primary (P3)
+//   6. a secondary containing P3 (S2)
+//   7. the last secondary (S3)
+// This picks which colors are used; regionOrder() decides the order of the regions.
 function pickPalette(count) {
   if (!(count >= 1 && count <= MAX_COLORS)) {
     throw new RangeError(`number of colors must be between 1 and ${MAX_COLORS}`);
   }
-  const primaries = shuffle(PRIMARY).slice(0, Math.min(count - 1, PRIMARY.length));
-  const secondaries = shuffle(SECONDARY).slice(0, Math.max(count - 1 - PRIMARY.length, 0));
-  return ["WHITE", ...primaries, ...secondaries];
+  const contains = (secondary, primary) => (MASK[secondary] & MASK[primary]) !== 0;
+  const p1 = "RED";
+  const s1 = choice(SECONDARY.filter((s) => contains(s, p1)));
+  const p2 = PRIMARY.find((p) => p !== p1 && contains(s1, p));
+  const p3 = PRIMARY.find((p) => p !== p1 && p !== p2);
+  const s2 = choice(SECONDARY.filter((s) => s !== s1 && contains(s, p3)));
+  const s3 = SECONDARY.find((s) => s !== s1 && s !== s2);
+  return ["WHITE", p1, s1, p2, p3, s2, s3].slice(0, count);
 }
 
 function colorOf(value) {
   return typeof value === "object" ? value.color : value;
+}
+
+// The player's color after moving from square `from` to square `to`, or null
+// if the move isn't allowed. `forbid` names a color the player may not take on
+// (used to check that every color is needed).
+function step(player, from, to, forbid = null) {
+  if (to === WALL) return null;
+  if (to === COLOR_CHANGE) return player;
+  if (from === COLOR_CHANGE) return colorOf(to) === forbid ? null : colorOf(to);
+  return canEnter(player, colorOf(to)) ? player : null;
 }
 
 // Can a player of color `player` step onto a square of color `square`?
@@ -90,14 +116,17 @@ function corners(size) {
 
 // Order the non-white colors so each region needs a new color: a color that sits
 // right after one containing it (red after magenta) could be walked through
-// without changing. Primaries before secondaries always works; shuffling a few
-// times first gives more variety.
+// without changing. The first color (red) always comes right after white.
+// Primaries before secondaries always works; shuffling a few times first gives
+// more variety.
 function regionOrder(colors) {
+  const [first, ...rest] = colors;
+  if (first === undefined) return [];
   for (let i = 0; i < 20; i++) {
-    const order = shuffle(colors);
+    const order = [first, ...shuffle(rest)];
     if (order.every((c, j) => j === 0 || !canEnter(order[j - 1], c))) return order;
   }
-  return [...colors.filter((c) => PRIMARY.includes(c)), ...colors.filter((c) => SECONDARY.includes(c))];
+  return [first, ...rest.filter((c) => PRIMARY.includes(c)), ...rest.filter((c) => SECONDARY.includes(c))];
 }
 
 // Split the passage lattice (odd cells) into `count` equal-size bands running
@@ -188,7 +217,7 @@ function layout(size, order) {
       }
     }
 
-    // The doorway into the next region is a changer, picked from the 10% of
+    // The doorway into the next region is a COLOR_CHANGE, picked from the 10% of
     // possible doorways farthest from the entrance so the region has to be explored.
     const doors = [];
     for (const [i, j] of members) {
@@ -200,7 +229,7 @@ function layout(size, order) {
     if (!doors.length) return null;
     doors.sort((x, y) => y.d - x.d);
     const { i, j, ni, nj } = choice(doors.slice(0, Math.max(1, Math.ceil(doors.length / 10))));
-    grid[i + ni + 1][j + nj + 1] = { color: colors[b], changer: colors[b + 1] };
+    grid[i + ni + 1][j + nj + 1] = COLOR_CHANGE;
     changers.push([i + ni + 1, j + nj + 1]);
     entries[b + 1] = [ni, nj];
   }
@@ -211,10 +240,10 @@ function layout(size, order) {
 }
 
 // Breadth-first search over (square, player color). Returns the shortest list of
-// squares from start to end, or null. Changers listed in `disabled` don't work.
-function solve(grid, start, end, disabled = []) {
+// squares from start to end, or null. With `forbid`, the player may never take
+// on that color.
+function solve(grid, start, end, forbid = null) {
   const size = grid.length;
-  const off = new Set(disabled.map((p) => p.join()));
   const n = COLOR_NAMES.length;
   const key = (r, c, color) => (r * size + c) * n + COLOR_NAMES.indexOf(color);
   const startState = [start[0], start[1], "WHITE"];
@@ -232,9 +261,8 @@ function solve(grid, start, end, disabled = []) {
       const nr = r + dr;
       const nc = c + dc;
       if (nr < 0 || nr >= size || nc < 0 || nc >= size) continue;
-      const value = grid[nr][nc];
-      if (value === WALL || !canEnter(color, colorOf(value))) continue;
-      const nextColor = value.changer && !off.has(`${nr},${nc}`) ? value.changer : color;
+      const nextColor = step(color, grid[r][c], grid[nr][nc], forbid);
+      if (!nextColor) continue;
       const k = key(nr, nc, nextColor);
       if (!prev.has(k)) {
         prev.set(k, state);
@@ -245,9 +273,9 @@ function solve(grid, start, end, disabled = []) {
   return null;
 }
 
-// How many routes the maze must have when colors are ignored.
-function targetSolutions(size, colorCount) {
-  return colorCount === 1 ? 1 : Math.floor(Math.log10(size * size));
+// How many places each pair of neighboring regions must touch.
+function connectionsPerPair(size) {
+  return Math.floor(Math.log10(size * size));
 }
 
 // Squares that could be on a route: everything except dead-end branches, which
@@ -324,18 +352,15 @@ function countSolutions(grid, start, end, colored, limit) {
       if (count >= limit) return;
       if (visited.has(to)) continue;
       let p = color;
-      let blocked = false;
       if (colored) {
+        let from = grid[Math.floor(at / size)][at % size];
         for (const [r, c] of cells) {
-          const value = grid[r][c];
-          if (!canEnter(p, colorOf(value))) {
-            blocked = true;
-            break;
-          }
-          if (value.changer) p = value.changer;
+          p = step(p, from, grid[r][c]);
+          if (!p) break;
+          from = grid[r][c];
         }
       }
-      if (blocked) continue;
+      if (!p) continue;
       visited.add(to);
       walk(to, p);
       visited.delete(to);
@@ -345,63 +370,45 @@ function countSolutions(grid, start, end, colored, limit) {
   return count;
 }
 
-// Open walls to make loops until there are exactly `target` routes ignoring
-// colors, while keeping exactly one route under the color rules. An opened
-// square takes the color of a neighbor so every color stays one region.
-// Returns false if the target can't be reached in this layout.
-function addLoops(grid, start, end, target) {
+// Open walls along the boundary between each pair of neighboring regions until
+// they touch in `connections` places (counting the COLOR_CHANGE doorway). An
+// opening is only kept if there is still exactly one route under the color
+// rules. An opened square takes the color of one side so every color stays one
+// region. Returns false if a boundary can't get enough openings.
+function addOpenings(grid, start, end, colors, connections) {
   const size = grid.length;
-  let routes = 1;
-
-  // For every square, the route square its dead-end branch hangs off. A new
-  // opening between two squares that hang off the same point only makes a
-  // side loop, so it can't add a route and isn't worth counting.
-  let attach;
-  const findAttachments = () => {
-    const { keep } = routeSquares(grid, start, end);
-    attach = new Int32Array(size * size).fill(-1);
-    const queue = [];
-    for (let i = 0; i < size * size; i++) if (keep[i]) (attach[i] = i), queue.push(i);
-    for (let h = 0; h < queue.length; h++) {
-      const r = Math.floor(queue[h] / size);
-      const c = queue[h] % size;
-      for (const [dr, dc] of STEPS) {
-        const n = (r + dr) * size + c + dc;
-        if (grid[r + dr][c + dc] !== WALL && attach[n] === -1) (attach[n] = attach[queue[h]]), queue.push(n);
+  for (let b = 0; b + 1 < colors.length; b++) {
+    const pair = new Set([colors[b], colors[b + 1]]);
+    const boundary = [];
+    for (let r = 1; r < size - 1; r++) {
+      for (let c = 1; c < size - 1; c++) {
+        if (grid[r][c] !== WALL || (r % 2) === (c % 2)) continue; // only walls between two passages
+        const [a, z] = r % 2 ? [grid[r][c - 1], grid[r][c + 1]] : [grid[r - 1][c], grid[r + 1][c]];
+        if (a === WALL || z === WALL || colorOf(a) === colorOf(z)) continue;
+        if (pair.has(colorOf(a)) && pair.has(colorOf(z))) boundary.push([r, c]);
       }
     }
-  };
-  findAttachments();
-
-  const walls = [];
-  for (let r = 1; r < size - 1; r++) {
-    for (let c = 1; c < size - 1; c++) {
-      if (grid[r][c] !== WALL || (r % 2) === (c % 2)) continue; // only walls between two passages
-      const [a, b] = r % 2 ? [[r, c - 1], [r, c + 1]] : [[r - 1, c], [r + 1, c]];
-      if (grid[a[0]][a[1]] !== WALL && grid[b[0]][b[1]] !== WALL) walls.push([r, c, a, b]);
-    }
-  }
-  for (const [r, c, a, b] of shuffle(walls)) {
-    if (routes === target) break;
-    if (attach[a[0] * size + a[1]] === attach[b[0] * size + b[1]]) continue;
-    const options = shuffle([...new Set([colorOf(grid[a[0]][a[1]]), colorOf(grid[b[0]][b[1]])])]);
-    for (const color of options) {
-      grid[r][c] = color;
-      const total = countSolutions(grid, start, end, false, target + 1);
-      if (total > routes && total <= target && countSolutions(grid, start, end, true, 2) === 1) {
-        routes = total;
-        findAttachments();
-        break;
+    let made = 1; // the doorway
+    for (const [r, c] of shuffle(boundary)) {
+      if (made === connections) break;
+      for (const color of shuffle([...pair])) {
+        grid[r][c] = color;
+        if (countSolutions(grid, start, end, true, 2) === 1) {
+          made++;
+          break;
+        }
+        grid[r][c] = WALL;
       }
-      grid[r][c] = WALL;
     }
+    if (made < connections) return false;
   }
-  return routes === target;
+  return true;
 }
 
 // Build a maze with START in the upper right and END in the bottom left.
-// A layout is only accepted if it has the required number of routes, and can't
-// be solved with any single changer switched off, so every color has to be used.
+// A layout is only accepted if every pair of neighboring regions touches in the
+// required number of places, there's exactly one route under the color rules,
+// and it can't be solved without taking on every color.
 function buildGrid(colorCount = MAX_COLORS, size = 100, maxAttempts = 200) {
   if (!(Number.isInteger(size) && size >= MIN_SIZE && size <= MAX_SIZE)) {
     throw new RangeError(`maze size must be between ${MIN_SIZE} and ${MAX_SIZE}`);
@@ -416,26 +423,35 @@ function buildGrid(colorCount = MAX_COLORS, size = 100, maxAttempts = 200) {
     const result = layout(size, order);
     if (!result) continue;
     const { grid, changers } = result;
-    if (!addLoops(grid, start, end, targetSolutions(size, colorCount))) continue;
+    if (!addOpenings(grid, start, end, ["WHITE", ...order], connectionsPerPair(size))) continue;
     const path = solve(grid, start, end);
     if (!path) continue;
-    if (changers.some((ch) => solve(grid, start, end, [ch]))) continue;
+    if (order.some((color) => solve(grid, start, end, color))) continue;
     return { grid, palette: ["WHITE", ...order], path, changers };
   }
   throw new Error(`a ${size}×${size} maze is too small for ${colorCount} colors; try a larger size`);
 }
 
-function render(grid, canvas, cell, flashOn = true) {
+function render(grid, canvas, cell, tick = 0) {
   const size = grid.length;
   canvas.width = canvas.height = size * cell;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "black";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  grid.forEach((row, r) => row.forEach((value, c) => drawCell(ctx, value, r, c, cell, flashOn)));
+  grid.forEach((row, r) => row.forEach((value, c) => drawCell(ctx, grid, r, c, cell, tick)));
 }
 
-// Changers flash between their own color and the region color around them.
-function drawCell(ctx, value, r, c, cell, flashOn = true) {
+// The colors a COLOR_CHANGE square flashes between: those of the squares it touches.
+function touchingColors(grid, r, c) {
+  const colors = STEPS.map(([dr, dc]) => grid[r + dr]?.[c + dc])
+    .filter((v) => v !== undefined && v !== WALL && v !== COLOR_CHANGE)
+    .map(colorOf);
+  return [...new Set(colors)];
+}
+
+// `tick` counts flashes; COLOR_CHANGE squares show the next touching color each tick.
+function drawCell(ctx, grid, r, c, cell, tick = 0) {
+  const value = grid[r][c];
   const x = c * cell;
   const y = r * cell;
   if (value === WALL) {
@@ -443,7 +459,11 @@ function drawCell(ctx, value, r, c, cell, flashOn = true) {
     ctx.fillRect(x, y, cell, cell);
     return;
   }
-  const fill = value.changer && flashOn ? value.changer : colorOf(value);
+  let fill = colorOf(value);
+  if (value === COLOR_CHANGE) {
+    const colors = touchingColors(grid, r, c);
+    fill = colors[tick % colors.length];
+  }
   // No outline, so neighboring squares of one color merge into a single corridor.
   ctx.fillStyle = RGB[fill];
   ctx.fillRect(x, y, cell, cell);

@@ -15,18 +15,18 @@ const winMenu = document.getElementById("win-menu");
 
 const COLOR_HINTS = {
   1: "White only",
-  2: "White + 1 random primary color",
-  3: "White + 2 random primary colors",
-  4: "White + all 3 primary colors",
-  5: "White + 3 primaries + 1 random secondary color",
-  6: "White + 3 primaries + 2 random secondary colors",
+  2: "White + red",
+  3: "White + red + a secondary containing red",
+  4: "White + red + a secondary + its other primary",
+  5: "White + all 3 primaries + a secondary containing red",
+  6: "White + all 3 primaries + 2 secondaries",
   7: "White + all primary and secondary colors",
 };
 
 let current = null;
 let player = null; // [row, col]
 let playerColor = "WHITE";
-let flashOn = true;
+let flashTick = 0;
 let moves = 0;
 let solved = false;
 let cellSize = 0;
@@ -82,7 +82,7 @@ function draw() {
   const size = current.grid.length;
   const room = Math.min(mazeScreen.clientWidth - 32, window.innerHeight - 160);
   cellSize = Math.max(2, Math.floor(room / size));
-  render(current.grid, canvas, cellSize, flashOn);
+  render(current.grid, canvas, cellSize, flashTick);
   drawPlayer(canvas.getContext("2d"), ...player, cellSize, playerColor);
 }
 
@@ -90,13 +90,13 @@ function updateMoves() {
   movesLabel.textContent = `Moves: ${moves} · You are ${playerColor.toLowerCase()}`;
 }
 
-// Blink the changers by redrawing just those squares (and the player if on one).
+// Flash the COLOR_CHANGE squares by redrawing just those (and the player if on one).
 setInterval(() => {
   if (!current || mazeScreen.hidden) return;
-  flashOn = !flashOn;
+  flashTick++;
   const ctx = canvas.getContext("2d");
   for (const [r, c] of current.changers) {
-    drawCell(ctx, current.grid[r][c], r, c, cellSize, flashOn);
+    drawCell(ctx, current.grid, r, c, cellSize, flashTick);
     if (r === player[0] && c === player[1]) drawPlayer(ctx, r, c, cellSize, playerColor);
   }
 }, 400);
@@ -109,7 +109,7 @@ const DIRECTIONS = {
 };
 
 // Step one square if the player's color allows it; only the two affected squares
-// are redrawn. Stepping on a changer takes on its color.
+// are redrawn. Stepping off a COLOR_CHANGE square takes on the color of the next square.
 function move([dr, dc]) {
   const [r, c] = player;
   const nr = r + dr;
@@ -117,11 +117,12 @@ function move([dr, dc]) {
   const grid = current.grid;
   if (nr < 0 || nr >= grid.length || nc < 0 || nc >= grid.length) return;
   const target = grid[nr][nc];
-  if (target === WALL || !canEnter(playerColor, colorOf(target))) return;
+  const nextColor = step(playerColor, grid[r][c], target);
+  if (!nextColor) return;
   const ctx = canvas.getContext("2d");
-  drawCell(ctx, grid[r][c], r, c, cellSize, flashOn);
+  drawCell(ctx, grid, r, c, cellSize, flashTick);
   player = [nr, nc];
-  if (target.changer) playerColor = target.changer;
+  playerColor = nextColor;
   drawPlayer(ctx, nr, nc, cellSize, playerColor);
   moves++;
   updateMoves();
