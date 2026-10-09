@@ -21,6 +21,8 @@ const touchControls = window.matchMedia("(pointer: coarse)");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const pauseMenu = document.getElementById("pause-menu");
 const winMenu = document.getElementById("win-menu");
+const routeButton = document.getElementById("route");
+const confettiCanvas = document.getElementById("confetti");
 
 const COLOR_HINTS = {
   1: "White only",
@@ -60,6 +62,17 @@ let building = false;
 let buildId = 0;
 let activeWorker = null;
 let workerBroken = false;
+// One round of play, reset by newRound().
+let history = []; // the state before each move, for undo
+let trail = []; // squares visited, in order (keys from squareKey)
+let visits = new Map(); // square key -> times on the trail
+let overlay = new Set(); // squares marked by a hint or the shown route
+let overlayKind = null; // "hint" or "route"
+let routeCells = []; // the shown route, for the minimap
+let hintTimer = 0;
+let restartArmed = 0; // timeout while waiting for a second Restart press
+let stats = null;
+let timer = { started: false, since: null, elapsed: 0 }; // ms; since = null while paused
 
 sizeInput.max = MAX_SIZE;
 colorsInput.max = MAX_COLORS;
@@ -120,7 +133,7 @@ function setBuilding(on) {
   building = on;
   buildingNote.hidden = !on;
   stage.classList.toggle("busy", on);
-  for (const id of ["again", "download"]) document.getElementById(id).disabled = on;
+  for (const id of ["again", "undo", "restart", "hint", "route"]) document.getElementById(id).disabled = on;
 }
 
 async function generate() {
@@ -145,13 +158,7 @@ async function generate() {
   setBuilding(false);
   current = result;
   error.textContent = "";
-  player = corners(size)[0];
-  playerColor = "WHITE";
-  moves = 0;
-  solved = false;
-  anim = null;
-  showMessage("");
-  updateStatus();
+  newRound();
   // Colors in the order the regions come, from start to end.
   info.innerHTML = "";
   for (const name of current.palette) {
@@ -170,6 +177,50 @@ async function generate() {
   paint();
 }
 
+// Back to the start of the current maze with a clean slate.
+function newRound() {
+  player = corners(current.grid.length)[0];
+  playerColor = "WHITE";
+  moves = 0;
+  solved = false;
+  anim = null;
+  history = [];
+  trail = [squareKey(...player)];
+  visits = new Map([[trail[0], 1]]);
+  overlay = new Set();
+  overlayKind = null;
+  routeCells = [];
+  clearTimeout(hintTimer);
+  setRouteButton(false);
+  stats = { presses: 0, hints: 0, undos: 0, routeShown: false };
+  timer = { started: false, since: null, elapsed: 0 };
+  showMessage("");
+  updateStatus();
+}
+
+const squareKey = (r, c) => r * current.grid.length + c;
+const squareOf = (key) => [Math.floor(key / current.grid.length), key % current.grid.length];
+
+// The timer starts with the first move and stops while paused or after winning.
+function startTimer() {
+  if (!timer.started) timer.started = true;
+  if (timer.since === null) timer.since = performance.now();
+}
+function pauseTimer() {
+  if (timer.since === null) return;
+  timer.elapsed += performance.now() - timer.since;
+  timer.since = null;
+}
+const elapsed = () => timer.elapsed + (timer.since === null ? 0 : performance.now() - timer.since);
+function formatTime(ms) {
+  const seconds = Math.floor(ms / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+function updateTime() {
+  const label = document.getElementById("time");
+  if (label) label.textContent = formatTime(elapsed());
+}
+
 // The solution path steps through the thin squares between passages too; a
 // move goes from one passage square to the next, so it covers two of those.
 const shortestMoves = () => (current.path.length - 1) / 2;
@@ -183,8 +234,9 @@ function layoutView(path) {
   const dpr = window.devicePixelRatio || 1;
   const top = stage.getBoundingClientRect().top + window.scrollY;
   const below = touchControls.matches ? dpad.offsetHeight + 32 : 16;
-  const roomW = Math.max(160, mazeScreen.clientWidth) * dpr;
-  const roomH = Math.max(160, window.innerHeight - top - below) * dpr;
+  const card = 18; // the card's padding and border around the canvas
+  const roomW = Math.max(160, mazeScreen.clientWidth - card) * dpr;
+  const roomH = Math.max(160, window.innerHeight - top - below - card) * dpr;
   const room = Math.min(roomW, roomH);
   fitPath = Math.max(2, Math.floor((room * 1.6) / size));
   while (fitPath > 2 && geometry(fitPath, dpr).pos(size) > room) fitPath--;
@@ -242,13 +294,50 @@ function paintSquares() {
   ctx.setTransform(1, 0, 0, 1, -view.x, -view.y);
   const [r0, r1] = [indexAt(view.y), indexAt(view.y + view.h - 1)];
   const [c0, c1] = [indexAt(view.x), indexAt(view.x + view.w - 1)];
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) drawCell(ctx, current.grid, r, c, geo, flashTick);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) drawSquare(ctx, r, c);
 }
+
+// A maze square plus what this round adds on top: trail dots where the player
+// has been, and white dots for a hint or the shown route. Dots stay inside the
+// square so redrawing one square never leaves marks on another.
+function drawSquare(ctx, r, c) {
+  drawCell(ctx, current.grid, r, c, geo, flashTick);
+  if (current.grid[r]?.[c] === undefined) return;
+  const key = squareKey(r, c);
+  const room = Math.min(geo.span(r), geo.span(c)) / 2 - 0.5;
+  const [x, y] = geo.center(r, c);
+  if (visits.get(key)) {
+    const radius = Math.min(geo.path * 0.1, room);
+    if (radius >= 0.75) {
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+      ctx.fillStyle = "rgb(0 0 0 / 0.3)";
+      ctx.fill();
+    }
+  }
+  if (overlay.has(key)) {
+    const radius = Math.min(geo.path * 0.17, room);
+    if (radius >= 1) {
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+      ctx.fillStyle = "black";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x, y, radius * 0.6, 0, 2 * Math.PI);
+      ctx.fillStyle = "white";
+      ctx.fill();
+    }
+  }
+}
+
+// The face shrinks on the start and end squares so their icons show around it.
+const faceScale = (r, c) => (current.grid[r]?.[c]?.marker ? 0.65 : 1);
+const drawPlayerNow = (ctx) => drawPlayer(ctx, ...player, geo, playerColor, "happy", faceScale(...player));
 
 function paint() {
   if (!current) return;
   paintSquares();
-  if (!anim) drawPlayer(canvas.getContext("2d"), ...player, geo, playerColor);
+  if (!anim) drawPlayerNow(canvas.getContext("2d"));
   updateMinimap();
 }
 
@@ -292,6 +381,16 @@ function updateMinimap() {
   ctx.lineWidth = Math.max(1, dpr * 1.5);
   ctx.strokeStyle = "#2563eb";
   ctx.strokeRect(view.x * scale, view.y * scale, view.w * scale, view.h * scale);
+  if (overlayKind === "route" && routeCells.length > 1) {
+    ctx.beginPath();
+    for (const cell of routeCells) ctx.lineTo(...geo.center(...cell).map((v) => v * scale));
+    ctx.lineJoin = "round";
+    for (const [color, width] of [["black", 3 * dpr], ["white", 1.5 * dpr]]) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke();
+    }
+  }
   const [x, y] = geo.center(...player);
   ctx.beginPath();
   ctx.arc(x * scale, y * scale, Math.max(2.5 * dpr, side / 40), 0, 2 * Math.PI);
@@ -324,7 +423,8 @@ function updateStatus() {
   statusLabel.innerHTML =
     `<span>You are ${swatch(playerColor)} <b>${playerColor.toLowerCase()}</b></span>` +
     `<span>Walks on ${walkable.map(swatch).join("")}</span>` +
-    `<span>Moves: <b>${moves}</b></span>`;
+    `<span>Moves: <b>${moves}</b></span>` +
+    `<span>Time: <b id="time">${formatTime(elapsed())}</b></span>`;
 }
 
 function showMessage(text) {
@@ -340,14 +440,17 @@ function blockedReason(color, target) {
   return `${title(color)} can't walk on ${colorOf(target).toLowerCase()}.`;
 }
 
-// Flash the COLOR_CHANGE squares by redrawing just those, then the player on top
-// in case their face spills onto one.
+// Swap the stripes on the COLOR_CHANGE squares by redrawing just those, then the
+// player on top in case their face spills onto one. Also ticks the timer.
+// The stripes hold still when the browser asks for reduced motion.
 setInterval(() => {
   if (!current || mazeScreen.hidden || building) return;
+  updateTime();
+  if (reducedMotion.matches) return;
   flashTick++;
   const ctx = canvas.getContext("2d");
-  for (const [r, c] of current.changers) drawCell(ctx, current.grid, r, c, geo, flashTick);
-  if (!anim) drawPlayer(ctx, ...player, geo, playerColor);
+  for (const [r, c] of current.changers) drawSquare(ctx, r, c);
+  if (!anim) drawPlayerNow(ctx);
 }, 400);
 
 const DIRECTIONS = {
@@ -409,12 +512,142 @@ function move(dir, run = false) {
     if (ways.length !== 1) break;
     [heading, m] = [ways[0].d, ways[0].m];
   }
+  history.push({ player, color: playerColor, moves, trailLength: trail.length });
+  for (const [r, c] of cells.slice(1)) {
+    const key = squareKey(r, c);
+    trail.push(key);
+    visits.set(key, (visits.get(key) || 0) + 1);
+  }
+  stats.presses++;
+  startTimer();
+  clearHint();
+  if (overlayKind === "route") {
+    showRoute(at, color); // repaints, so put the face back until the slide starts
+    drawPlayerNow(canvas.getContext("2d"));
+  }
   animate({ cells, points: cells, fills, toward: dir, steps });
   player = at;
   playerColor = color;
   moves += steps;
   updateStatus();
-  if (current.grid[at[0]][at[1]].marker === END) solved = true;
+  if (current.grid[at[0]][at[1]].marker === END) {
+    solved = true;
+    pauseTimer();
+  }
+}
+
+// Step back before the last move or run, restoring color, moves and trail.
+function undo() {
+  if (building || !current || solved || !history.length) return;
+  finishAnimation();
+  const before = history.pop();
+  while (trail.length > before.trailLength) {
+    const key = trail.pop();
+    visits.set(key, visits.get(key) - 1);
+  }
+  player = before.player;
+  playerColor = before.color;
+  moves = before.moves;
+  stats.undos++;
+  clearHint();
+  showMessage("");
+  if (overlayKind === "route") showRoute(player, playerColor, false);
+  follow(...geo.center(...player));
+  paint();
+  updateStatus();
+}
+
+// Restart asks for a second press, since it throws away the round so far.
+function restart() {
+  if (building || !current || (moves === 0 && !solved)) return;
+  finishAnimation();
+  if (!restartArmed) {
+    showMessage("Press R or Restart again to start this maze over.");
+    restartArmed = setTimeout(() => (restartArmed = 0), 2500);
+    return;
+  }
+  clearTimeout(restartArmed);
+  restartArmed = 0;
+  newRound();
+  centerOn(...geo.center(...player));
+  paint();
+}
+
+// The shortest way to the end from (at, color), or null. It follows the color
+// rules, so it can pass a square twice in different colors.
+function routeFrom(at, color) {
+  return solve(current.grid, at, corners(current.grid.length)[1], null, color);
+}
+
+// Mark the next few squares of the way to the end for a few seconds.
+function hint() {
+  if (building || !current || solved) return;
+  finishAnimation();
+  if (overlayKind === "route") {
+    showMessage("The route is already showing.");
+    return;
+  }
+  const route = routeFrom(player, playerColor);
+  if (!route) {
+    showMessage("There's no way to the end from here. Try Undo or Restart.");
+    return;
+  }
+  clearHint();
+  const ahead = route.slice(1, 13);
+  overlay = new Set(ahead.map((cell) => squareKey(...cell)));
+  overlayKind = "hint";
+  const ctx = canvas.getContext("2d");
+  for (const cell of ahead) drawSquare(ctx, ...cell);
+  drawPlayerNow(ctx);
+  stats.hints++;
+  const names = { "-1,0": "up", "1,0": "down", "0,-1": "left", "0,1": "right" };
+  showMessage(`Hint: head ${names[[route[1][0] - player[0], route[1][1] - player[1]].join()]}.`);
+  hintTimer = setTimeout(clearHint, 4000);
+}
+
+function clearHint() {
+  clearTimeout(hintTimer);
+  if (overlayKind !== "hint") return;
+  const cells = [...overlay].map(squareOf);
+  overlay = new Set();
+  overlayKind = null;
+  const ctx = canvas.getContext("2d");
+  for (const cell of cells) drawSquare(ctx, ...cell);
+  if (!anim) drawPlayerNow(ctx);
+}
+
+// Show the whole way to the end from (at, color), on the maze and the minimap.
+function showRoute(at, color, repaint = true) {
+  const route = routeFrom(at, color) || [];
+  routeCells = route;
+  overlay = new Set(route.slice(1).map((cell) => squareKey(...cell)));
+  overlayKind = "route";
+  if (repaint) {
+    paintSquares();
+    updateMinimap();
+  }
+}
+
+function toggleRoute() {
+  if (building || !current || solved) return;
+  finishAnimation();
+  clearHint();
+  if (overlayKind === "route") {
+    overlay = new Set();
+    overlayKind = null;
+    routeCells = [];
+    setRouteButton(false);
+  } else {
+    stats.routeShown = true;
+    showRoute(player, playerColor, false);
+    setRouteButton(true);
+  }
+  paint();
+}
+
+function setRouteButton(on) {
+  routeButton.setAttribute("aria-pressed", on);
+  routeButton.textContent = on ? "Hide route" : "Show route";
 }
 
 // Slide the smiley through `points` (squares), blending between `fills` (colors),
@@ -425,6 +658,7 @@ function animate({ cells, points, fills, toward, bump = false, steps = 1 }) {
     start: performance.now(),
     duration: reducedMotion.matches ? 0 : bump ? 160 : Math.min(90 + (steps - 1) * 45, 900),
     cells,
+    pointSquares: points,
     points: points.map((p) => geo.center(...p)),
     fills: fills.map((color) => RGB[color]),
     toward,
@@ -458,14 +692,15 @@ function frame(now) {
     paintSquares();
     updateMinimap();
   } else {
-    for (const [r, c] of anim.cells) drawCell(ctx, current.grid, r, c, geo, flashTick);
+    for (const [r, c] of anim.cells) drawSquare(ctx, r, c);
   }
   // Only paint inside the squares just redrawn, so no part of the face is left behind.
   ctx.save();
   ctx.beginPath();
   for (const [r, c] of anim.cells) ctx.rect(geo.pos(c), geo.pos(r), geo.span(c), geo.span(r));
   ctx.clip();
-  drawPlayerAt(ctx, x, y, geo, fill, anim.bump && t < 1 ? "oops" : "happy");
+  const near = anim.pointSquares[f < 0.5 ? i : Math.min(i + 1, last)];
+  drawPlayerAt(ctx, x, y, geo, fill, anim.bump && t < 1 ? "oops" : "happy", faceScale(...near));
   ctx.restore();
   if (t < 1) {
     requestAnimationFrame(frame);
@@ -473,11 +708,65 @@ function frame(now) {
   }
   anim = null;
   updateMinimap();
-  if (solved && !winMenu.open) {
-    document.getElementById("win-text").textContent =
-      `You reached the end in ${moves} moves. The shortest route is ${shortestMoves()} moves.`;
-    winMenu.showModal();
-  }
+  if (solved && !winMenu.open) showWin();
+}
+
+function showWin() {
+  const shortest = shortestMoves();
+  const perfect = moves === shortest && !stats.routeShown && !stats.hints;
+  document.getElementById("win-text").textContent = perfect
+    ? "A perfect run: the shortest route, with no help."
+    : `You reached the end in ${moves} moves.`;
+  const rows = [
+    ["Moves", `${moves} (shortest ${shortest} · ${Math.round((100 * shortest) / moves)}% efficient)`],
+    ["Time", formatTime(elapsed())],
+    ["Presses and swipes", stats.presses],
+    ["Hints", stats.hints],
+    ["Undos", stats.undos],
+    ["Route shown", stats.routeShown ? "Yes" : "No"],
+  ];
+  document.getElementById("win-stats").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  winMenu.showModal();
+  confetti();
+}
+
+// Rainbow confetti over the win screen for a couple of seconds.
+function confetti() {
+  if (reducedMotion.matches) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = (confettiCanvas.width = window.innerWidth * dpr);
+  const h = (confettiCanvas.height = window.innerHeight * dpr);
+  const ctx = confettiCanvas.getContext("2d");
+  const colors = Object.values(RGB).filter((c) => c !== RGB.WHITE);
+  const pieces = Array.from({ length: 160 }, () => ({
+    x: Math.random() * w,
+    y: -Math.random() * h * 0.5,
+    vx: (Math.random() - 0.5) * 4 * dpr,
+    vy: (2 + Math.random() * 4) * dpr,
+    spin: (Math.random() - 0.5) * 0.3,
+    angle: Math.random() * Math.PI,
+    size: (6 + Math.random() * 6) * dpr,
+    color: colors[Math.floor(Math.random() * colors.length)],
+  }));
+  const start = performance.now();
+  const tick = (now) => {
+    ctx.clearRect(0, 0, w, h);
+    if (now - start > 3000 || !winMenu.open) return;
+    for (const p of pieces) {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.08 * dpr;
+      p.angle += p.spin;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.angle);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
+      ctx.restore();
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 // Jump to the end of the current animation, so quick key presses never lag behind.
@@ -490,6 +779,7 @@ function finishAnimation() {
 function mainMenu() {
   pauseMenu.close();
   winMenu.close();
+  pauseTimer();
   if (building) {
     buildId++; // drop the maze being built
     activeWorker?.terminate();
@@ -523,16 +813,38 @@ document.getElementById("win-main").addEventListener("click", mainMenu);
 document.getElementById("zoom-in").addEventListener("click", zoomIn);
 document.getElementById("zoom-out").addEventListener("click", zoomOut);
 document.getElementById("zoom-fit").addEventListener("click", zoomFit);
+for (const [id, action] of [["undo", undo], ["restart", restart], ["hint", hint], ["route", toggleRoute]]) {
+  document.getElementById(id).addEventListener("click", (e) => {
+    e.currentTarget.blur(); // keep Enter/Space from repeating it while playing
+    action();
+  });
+}
+// The timer doesn't run while the pause menu is open.
+pauseMenu.addEventListener("close", () => {
+  if (timer.started && !solved && !mazeScreen.hidden) startTimer();
+});
 
 const ZOOM_KEYS = { "+": zoomIn, "=": zoomIn, "-": zoomOut, _: zoomOut, 0: zoomFit };
+const PLAY_KEYS = {
+  z: undo,
+  u: undo,
+  backspace: undo,
+  r: restart,
+  h: (e) => (e.shiftKey ? toggleRoute() : hint()),
+};
 
 window.addEventListener("keydown", (e) => {
   // Open dialogs handle their own keys; Esc closes them (i.e. resumes) natively.
   if (mazeScreen.hidden || pauseMenu.open || winMenu.open) return;
   const dir = DIRECTIONS[e.key] || DIRECTIONS[e.key.toLowerCase()];
+  const key = e.key.toLowerCase();
   if (e.key === "Escape") {
     e.preventDefault();
+    pauseTimer();
     pauseMenu.showModal();
+  } else if (key === "z" && (e.ctrlKey || e.metaKey) && !e.altKey) {
+    e.preventDefault();
+    undo();
   } else if (e.ctrlKey || e.metaKey || e.altKey) {
     return; // leave browser shortcuts (and browser zoom) alone
   } else if (dir) {
@@ -541,8 +853,14 @@ window.addEventListener("keydown", (e) => {
   } else if (ZOOM_KEYS[e.key]) {
     e.preventDefault();
     ZOOM_KEYS[e.key]();
+  } else if (PLAY_KEYS[key]) {
+    e.preventDefault();
+    PLAY_KEYS[key](e);
   }
 });
+// TODO: the Download JSON button is hidden for now. The intent was a way to save
+// a game; revisit as save/load of a round in progress (grid, position, color,
+// moves, trail, time), not just the grid.
 document.getElementById("download").addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(current.grid)], { type: "application/json" });
   const link = document.createElement("a");

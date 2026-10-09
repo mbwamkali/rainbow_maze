@@ -16,8 +16,7 @@
 // - Each pair of neighboring regions touches in exactly floor(log10(size × size))
 //   places: one COLOR_CHANGE doorway, and openings that the color rules block.
 //   So there are several ways between two colors, but following the color
-//   rules there is exactly one route through the maze. A route never visits
-//   the same square twice.
+//   rules there is exactly one route through the maze.
 
 const WALL = "WALL";
 // Flashes between the colors of the squares it touches.
@@ -30,13 +29,14 @@ const END = "END";
 
 // Additive (light) model: primaries red/green/blue, secondaries cyan/magenta/yellow,
 // and white = all primaries combined.
+// Slightly softened from pure #ff0000 etc., which is harsh next to white.
 const RGB = {
-  RED: "#ff0000",
-  GREEN: "#00ff00",
-  BLUE: "#0000ff",
-  CYAN: "#00ffff",
-  MAGENTA: "#ff00ff",
-  YELLOW: "#ffff00",
+  RED: "#e63946",
+  GREEN: "#2fbf71",
+  BLUE: "#3a6ff7",
+  CYAN: "#22c3d6",
+  MAGENTA: "#d64fc9",
+  YELLOW: "#f5cc2a",
   WHITE: "#ffffff",
 };
 // Which primaries make up each color, as bits: red = 1, green = 2, blue = 4.
@@ -382,12 +382,12 @@ function layout(size, order, style = "bands") {
 
 // Breadth-first search over (square, player color). Returns the shortest list of
 // squares from start to end, or null. With `forbid`, the player may never take
-// on that color.
-function solve(grid, start, end, forbid = null) {
+// on that color. `startColor` is the player's color at `start`.
+function solve(grid, start, end, forbid = null, startColor = "WHITE") {
   const size = grid.length;
   const n = COLOR_NAMES.length;
   const key = (r, c, color) => (r * size + c) * n + COLOR_NAMES.indexOf(color);
-  const startState = [start[0], start[1], "WHITE"];
+  const startState = [start[0], start[1], startColor];
   const prev = new Map([[key(...startState), null]]);
   const queue = [startState];
   for (let head = 0; head < queue.length; head++) {
@@ -615,7 +615,8 @@ function touchingColors(grid, r, c) {
   return [...new Set(colors)];
 }
 
-// `tick` counts flashes; COLOR_CHANGE squares show the next touching color each tick.
+// `tick` counts flashes; COLOR_CHANGE squares are striped in the colors they join,
+// and the stripes swap places each tick.
 function drawCell(ctx, grid, r, c, geo, tick = 0) {
   const value = grid[r]?.[c];
   if (value === undefined) return;
@@ -628,13 +629,12 @@ function drawCell(ctx, grid, r, c, geo, tick = 0) {
     ctx.fillRect(x, y, w, h);
     return;
   }
-  let fill = colorOf(value);
   if (value === COLOR_CHANGE) {
-    const colors = touchingColors(grid, r, c);
-    fill = colors[tick % colors.length];
+    drawDoorway(ctx, touchingColors(grid, r, c), x, y, w, h, tick);
+    return;
   }
   // No outline, so neighboring squares of one color merge into a single corridor.
-  ctx.fillStyle = RGB[fill];
+  ctx.fillStyle = RGB[colorOf(value)];
   ctx.fillRect(x, y, w, h);
   if (value.marker) drawMarker(ctx, value.marker, x, y, w);
 }
@@ -646,24 +646,46 @@ function mixColor(a, b, t) {
   return `#${mixed.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 
+// A checkerboard of the colors on either side, two squares deep, so both colors
+// always show and the texture stands out from the solid squares around it.
+function drawDoorway(ctx, colors, x, y, w, h, tick) {
+  const [first, second] = [colors[0], colors[colors.length - 1]];
+  const deep = Math.min(w, h) >= 4 ? 2 : 1; // squares across the doorway's thin side
+  const q = Math.min(w, h) / deep;
+  const count = Math.max(2, Math.round(Math.max(w, h) / q));
+  const step = Math.max(w, h) / count;
+  for (let i = 0; i < count; i++) {
+    for (let j = 0; j < deep; j++) {
+      ctx.fillStyle = RGB[(i + j + tick) % 2 ? second : first];
+      const a = Math.round(i * step);
+      const b = Math.round((i + 1) * step);
+      const c = Math.round(j * q);
+      const d = Math.round((j + 1) * q);
+      if (w >= h) ctx.fillRect(x + a, y + c, b - a, d - c);
+      else ctx.fillRect(x + c, y + a, d - c, b - a);
+    }
+  }
+}
+
 // The player is a smiley face in their current color, as wide as most of the
 // path and outlined black then white so it reads on every square.
-function drawPlayer(ctx, r, c, geo, color = "WHITE", mood = "happy") {
+// `scale` shrinks the face, e.g. so the start and end icons show around it.
+function drawPlayer(ctx, r, c, geo, color = "WHITE", mood = "happy", scale = 1) {
   ctx.save();
   ctx.beginPath();
   ctx.rect(geo.pos(c), geo.pos(r), geo.span(c), geo.span(r));
   ctx.clip(); // never paint outside the player's own square
-  drawPlayerAt(ctx, ...geo.center(r, c), geo, RGB[color], mood);
+  drawPlayerAt(ctx, ...geo.center(r, c), geo, RGB[color], mood, scale);
   ctx.restore();
 }
 
 // Draw the face centered on pixel (cx, cy) with fill `fill` (a CSS color).
 // mood "happy" smiles; "oops" (a blocked move) makes a small round mouth.
-function drawPlayerAt(ctx, cx, cy, geo, fill, mood = "happy") {
+function drawPlayerAt(ctx, cx, cy, geo, fill, mood = "happy", scale = 1) {
   // Keep the face and its outline (1.5 lines past the radius, plus a pixel of
   // anti-aliasing) inside the path, or it leaves marks on the walls beside it.
   const line = Math.max(0.5, geo.path / 16);
-  const radius = Math.max(1, Math.min(geo.path * 0.4, geo.path / 2 - 1.5 * line - 1));
+  const radius = scale * Math.max(1, Math.min(geo.path * 0.4, geo.path / 2 - 1.5 * line - 1));
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
   ctx.fillStyle = fill;
@@ -692,27 +714,38 @@ function drawPlayerAt(ctx, cx, cy, geo, fill, mood = "happy") {
   ctx.stroke();
 }
 
-// Draw each marker twice: a wider white stroke underneath gives the black
-// stroke a white outline so it stands out on every color.
+// START is a doorway arch and END a star. Each is drawn twice: a wider white
+// stroke underneath gives the black stroke a white outline so it stands out on
+// every color. Both are wider than the player's face is when standing on them.
 function drawMarker(ctx, marker, x, y, cell) {
-  const pad = cell / 6;
-  const width = Math.max(1, cell / 10);
+  const width = Math.max(1, cell / 12);
   const halo = Math.max(1, width / 2);
-  const x0 = x + pad, y0 = y + pad, x1 = x + cell - pad, y1 = y + cell - pad;
-  const strokes = [["white", width + 2 * halo, "square"], ["black", width, "butt"]];
-  for (const [color, lineWidth, lineCap] of strokes) {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = lineWidth;
-    ctx.lineCap = lineCap; // square caps extend the white stroke past each tip
-    ctx.beginPath();
-    if (marker === START) {
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
-      ctx.moveTo(x0, y1);
-      ctx.lineTo(x1, y0);
-    } else {
-      ctx.arc(x + cell / 2, y + cell / 2, cell / 2 - pad, 0, 2 * Math.PI);
+  const cx = x + cell / 2;
+  const cy = y + cell / 2;
+  ctx.beginPath();
+  if (marker === START) {
+    const half = cell * 0.3;
+    const top = y + cell * 0.42;
+    ctx.moveTo(cx - half, y + cell * 0.88);
+    ctx.lineTo(cx - half, top);
+    ctx.arc(cx, top, half, Math.PI, 0);
+    ctx.lineTo(cx + half, y + cell * 0.88);
+    ctx.closePath();
+  } else {
+    for (let k = 0; k < 10; k++) {
+      const radius = (k % 2 ? 0.19 : 0.42) * cell;
+      const angle = -Math.PI / 2 + (k * Math.PI) / 5;
+      ctx.lineTo(cx + radius * Math.cos(angle), cy + radius * Math.sin(angle) + cell * 0.03);
     }
-    ctx.stroke();
+    ctx.closePath();
+    ctx.fillStyle = "#ffd447";
+    ctx.fill();
   }
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "white";
+  ctx.lineWidth = width + 2 * halo;
+  ctx.stroke();
+  ctx.strokeStyle = "black";
+  ctx.lineWidth = width;
+  ctx.stroke();
 }

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Rainbow Maze</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7'/%3E%3Cpath d='M6 9h20M6 16h20M6 23h20' stroke-width='5' stroke='%23e63946'/%3E%3Cpath d='M6 16h20' stroke-width='5' stroke='%232fbf71'/%3E%3Cpath d='M6 23h20' stroke-width='5' stroke='%233a6ff7'/%3E%3Ccircle cx='22' cy='9' r='3.2' fill='%23fff' stroke='%23000' stroke-width='1.2'/%3E%3C/svg%3E">
   <style>
     :root {
       --bg: #f4f4f5;
@@ -43,7 +44,11 @@
       font: 16px/1.5 system-ui, sans-serif;
     }
     main { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
-    h1 { margin: 0 0 4px; font-size: 1.75rem; }
+    h1 {
+      margin: 0 0 4px; font-size: 2rem; font-weight: 800; width: fit-content;
+      background: linear-gradient(90deg, #e63946, #f5cc2a, #2fbf71, #22c3d6, #3a6ff7, #d64fc9);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
     .sub { margin: 0 0 24px; color: var(--muted); }
     form {
       max-width: 420px;
@@ -95,17 +100,21 @@
     }
     .chip i { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #888; }
     .meta { color: var(--muted); font-size: 0.875rem; }
-    #stage { position: relative; width: fit-content; max-width: 100%; }
+    #stage {
+      position: relative; width: fit-content; max-width: 100%;
+      padding: 8px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--panel); box-shadow: 0 4px 16px rgb(0 0 0 / 0.08);
+    }
     #stage.busy { min-width: min(100%, 320px); min-height: 200px; }
     #canvas { display: block; max-width: 100%; touch-action: none; }
     #minimap {
-      position: absolute; top: 8px; right: 8px;
+      position: absolute; top: 16px; right: 16px;
       border: 2px solid #fff; border-radius: 4px;
       box-shadow: 0 1px 6px rgb(0 0 0 / 0.5);
       pointer-events: none;
     }
     #building {
-      position: absolute; inset: 0;
+      position: absolute; inset: 0; border-radius: 12px;
       display: grid; place-items: center;
       background: rgb(0 0 0 / 0.55); color: #fff; font-weight: 600;
     }
@@ -118,7 +127,9 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { #building span::before { animation-duration: 3s; } }
-    .zoom { display: inline-flex; gap: 4px; margin-left: auto; }
+    .zoom, .play { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+    .zoom { margin-left: auto; }
+    #route[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
     .zoom button { min-width: 40px; padding: 8px 10px; }
     button:disabled { opacity: 0.5; cursor: default; }
     .hint { color: var(--muted); font-size: 0.875rem; margin: 0 0 12px; }
@@ -162,14 +173,22 @@
     dialog h2 { margin: 0 0 8px; font-size: 1.25rem; }
     dialog p { margin: 0 0 20px; color: var(--muted); }
     dialog .actions { display: flex; flex-direction: column; gap: 8px; }
+    #win-menu > :not(#confetti) { position: relative; }
+    #confetti { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+    .stats {
+      display: grid; grid-template-columns: auto 1fr; gap: 4px 16px;
+      margin: 0 0 20px; font-size: 0.95rem;
+    }
+    .stats dt { color: var(--muted); }
+    .stats dd { margin: 0; font-weight: 600; }
   </style>
 </head>
 <body>
   <main>
     <section id="setup">
       <h1>Rainbow Maze</h1>
-      <p class="sub">Start at the X in the upper left and find your way to the circle in the bottom right.
-        You start out white, and white can only walk on white. Flashing blocks join the colors:
+      <p class="sub">Start at the doorway in the upper left and find your way to the star in the bottom right.
+        You start out white, and white can only walk on white. Striped doorways join the colors:
         anyone can step onto one, and whatever square you step onto next, you take on its color — in any direction.
         A color can walk on itself, on white, and on any color it contains: magenta (red + blue) walks on red and blue too, but not green.</p>
       <form id="setup-form">
@@ -201,7 +220,14 @@
       <div class="toolbar">
         <button id="back" type="button">← Change settings</button>
         <button id="again" class="primary" type="button">New maze</button>
-        <button id="download" type="button">Download JSON</button>
+        <!-- TODO: hidden until it becomes "save game" (see the note in app.js). -->
+        <button id="download" type="button" hidden>Download JSON</button>
+        <span class="play" role="group" aria-label="Play">
+          <button id="undo" type="button" title="Undo the last move (Z)">↶ Undo</button>
+          <button id="restart" type="button" title="Start this maze over (R, twice)">Restart</button>
+          <button id="hint" type="button" title="Show the next few squares (H)">Hint</button>
+          <button id="route" type="button" aria-pressed="false" title="Show or hide the way to the end (Shift + H)">Show route</button>
+        </span>
         <span class="zoom" role="group" aria-label="Zoom">
           <button id="zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
           <button id="zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
@@ -210,7 +236,7 @@
       </div>
       <div id="info"></div>
       <p class="hint">
-        <span class="keys-only">Move with <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · hold <kbd>Shift</kbd> to run to the next turn-off · <kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd> or the mouse wheel to zoom · <kbd>Esc</kbd> for menu</span>
+        <span class="keys-only">Move with <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · hold <kbd>Shift</kbd> to run to the next turn-off · <kbd>Z</kbd> undo · <kbd>R</kbd> restart · <kbd>H</kbd> hint · <kbd>Shift</kbd>+<kbd>H</kbd> route · <kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd> or the mouse wheel to zoom · <kbd>Esc</kbd> for menu</span>
         <span class="touch-only">Swipe to run to the next turn-off, or use the arrows below to step</span>
       </p>
       <div id="status"></div>
@@ -240,7 +266,9 @@
 
   <dialog id="win-menu">
     <h2>You made it!</h2>
+    <canvas id="confetti" aria-hidden="true"></canvas>
     <p id="win-text"></p>
+    <dl id="win-stats" class="stats"></dl>
     <div class="actions">
       <button id="win-again" class="primary" type="button" autofocus>New maze</button>
       <button id="win-main" type="button">Main menu</button>

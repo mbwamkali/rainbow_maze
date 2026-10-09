@@ -15,8 +15,7 @@ Same rules as the web app (web/maze.js):
 - Each pair of neighboring regions touches in exactly floor(log10(size x size))
   places: one COLOR_CHANGE doorway, and openings that the color rules block.
   So there are several ways between two colors, but following the color rules
-  there is exactly one route through the maze. A route never visits the same
-  square twice.
+  there is exactly one route through the maze.
 """
 
 import itertools
@@ -41,13 +40,14 @@ START = "START"
 END = "END"
 # Additive (light) model: primaries red/green/blue, secondaries cyan/magenta/yellow,
 # and white = all primaries combined.
+# Slightly softened from pure (255, 0, 0) etc.; same values as the web app.
 RGB = {
-    "RED": (255, 0, 0),
-    "GREEN": (0, 255, 0),
-    "BLUE": (0, 0, 255),
-    "CYAN": (0, 255, 255),
-    "MAGENTA": (255, 0, 255),
-    "YELLOW": (255, 255, 0),
+    "RED": (230, 57, 70),
+    "GREEN": (47, 191, 113),
+    "BLUE": (58, 111, 247),
+    "CYAN": (34, 195, 214),
+    "MAGENTA": (214, 79, 201),
+    "YELLOW": (245, 204, 42),
     "WHITE": (255, 255, 255),
 }
 # Which primaries make up each color, as bits: red = 1, green = 2, blue = 4.
