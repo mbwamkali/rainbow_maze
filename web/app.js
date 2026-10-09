@@ -936,20 +936,56 @@ canvas.addEventListener("wheel", (e) => {
   (e.deltaY < 0 ? zoomIn : zoomOut)();
 }, { passive: false });
 
-// Touch: a swipe runs along the corridor; holding a pad button steps one square
-// at a time, repeating.
+// Touch: a swipe runs along the corridor, two fingers pinch to zoom, and holding
+// a pad button steps one square at a time, repeating.
+const touches = new Map(); // pointer id -> [x, y] for fingers on the maze
 let swipeStart = null;
+let pinch = null; // { distance, path } when two fingers went down
+let pinchFrame = 0;
+const fingerGap = () => {
+  const [[x1, y1], [x2, y2]] = [...touches.values()];
+  return Math.hypot(x2 - x1, y2 - y1);
+};
 canvas.addEventListener("pointerdown", (e) => {
-  if (e.pointerType !== "mouse") swipeStart = [e.clientX, e.clientY];
+  if (e.pointerType === "mouse") return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  try {
+    canvas.setPointerCapture(e.pointerId); // keep getting moves if the finger leaves the maze
+  } catch {}
+  if (touches.size === 1) {
+    swipeStart = [e.clientX, e.clientY];
+  } else if (touches.size === 2 && geo) {
+    swipeStart = null; // a pinch is never a swipe
+    pinch = { distance: Math.max(1, fingerGap()), path: geo.path };
+  }
 });
-canvas.addEventListener("pointerup", (e) => {
-  if (!swipeStart || pauseMenu.open || winMenu.open) return;
+canvas.addEventListener("pointermove", (e) => {
+  if (!touches.has(e.pointerId)) return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (!pinch || touches.size !== 2 || pinchFrame) return;
+  // Zoom at most once per frame; zoomTo keeps the player in view.
+  pinchFrame = requestAnimationFrame(() => {
+    pinchFrame = 0;
+    if (!pinch || touches.size !== 2) return;
+    const path = Math.round((pinch.path * fingerGap()) / pinch.distance);
+    if (path !== geo.path) zoomTo(path);
+  });
+});
+function liftFinger(e) {
+  if (!touches.delete(e.pointerId)) return;
+  if (pinch) {
+    if (!touches.size) pinch = null; // the pinch ends when the last finger lifts
+    return;
+  }
+  if (!swipeStart || e.type !== "pointerup" || pauseMenu.open || winMenu.open) return;
   const dx = e.clientX - swipeStart[0];
   const dy = e.clientY - swipeStart[1];
   swipeStart = null;
   if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return; // a tap, not a swipe
   move(Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0], true);
-});
+}
+canvas.addEventListener("pointerup", liftFinger);
+canvas.addEventListener("pointercancel", liftFinger);
 let repeatTimer = 0;
 const stopRepeat = () => clearTimeout(repeatTimer);
 for (const button of document.querySelectorAll("#dpad button")) {

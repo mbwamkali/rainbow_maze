@@ -281,6 +281,32 @@ test("zoom buttons zoom, and the minimap shows only when zoomed in", async () =>
   assert(app.ev("!minimap.hidden"), "the minimap should show when zoomed in");
 });
 
+test("touch: a swipe runs, a pinch zooms, and ending a pinch doesn't move", async () => {
+  const app = await openApp("size=101&colors=7");
+  // Synthetic touch pointers on the maze canvas.
+  app.ev(`T.touch = (type, id, x, y) => {
+    const box = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: "touch", isPrimary: id === 1,
+      clientX: box.left + x, clientY: box.top + y, bubbles: true }));
+  };`);
+  const key = app.ev("T.solutionKey()");
+  const [dx, dy] = { ArrowUp: [0, -80], ArrowDown: [0, 80], ArrowLeft: [-80, 0], ArrowRight: [80, 0] }[key];
+  app.ev(`T.touch("pointerdown", 1, 200, 200); T.touch("pointerup", 1, ${200 + dx}, ${200 + dy}); finishAnimation()`);
+  const afterSwipe = app.ev("moves");
+  assert(afterSwipe > 0, `a ${key} swipe didn't move`);
+  app.ev(`T.touch("pointerdown", 1, 200, 200); T.touch("pointerup", 1, 205, 203)`);
+  assert(app.ev("moves") === afterSwipe, "a tap moved the player");
+
+  const before = app.ev("geo.path");
+  app.ev(`T.touch("pointerdown", 1, 200, 200); T.touch("pointerdown", 2, 300, 200); T.touch("pointermove", 2, 350, 200)`);
+  await until(() => app.ev("geo.path") !== before, 1000, "the pinch to zoom");
+  const zoomed = app.ev("geo.path");
+  assert(Math.abs(zoomed - before * 1.5) <= 1, `pinching 100px -> 150px zoomed ${before} -> ${zoomed}`);
+  app.ev(`T.touch("pointerup", 2, 350, 200); T.touch("pointerup", 1, 120, 200)`);
+  assert(app.ev("moves") === afterSwipe, "lifting the fingers after a pinch moved the player");
+  assert(app.ev("touches.size === 0 && pinch === null"), "the pinch didn't end");
+});
+
 test("a blocked move says why", async () => {
   const app = await openApp("size=41&colors=4&layout=bands");
   // Stand next to an open, colored square in a color that can't walk on it.
