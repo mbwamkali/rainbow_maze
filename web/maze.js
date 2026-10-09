@@ -22,8 +22,8 @@ const WALL = "WALL";
 // Flashes between the colors of the squares it touches.
 const COLOR_CHANGE = "COLOR_CHANGE";
 // Start and end keep their region color and carry a marker:
-//   {color: "WHITE", marker: "START"}   drawn as an X
-//   {color: "BLUE", marker: "END"}      drawn as a circle
+//   {color: "WHITE", marker: "START"}   drawn as a doorway arch
+//   {color: "BLUE", marker: "END"}      drawn as a star
 const START = "START";
 const END = "END";
 
@@ -327,8 +327,7 @@ function layout(size, order, style = "bands") {
     const stack = [[ri, rj]];
     while (stack.length) {
       const [i, j] = stack[stack.length - 1];
-      const next = STEPS.map(([di, dj]) => [i + di, j + dj])
-        .filter(([ni, nj]) => inside(ni, nj) && band[ni][nj] === b && !seen.has(key(ni, nj)));
+      const next = latticeNeighbors(m, i, j).filter(([ni, nj]) => band[ni][nj] === b && !seen.has(key(ni, nj)));
       if (!next.length) {
         stack.pop();
         continue;
@@ -579,15 +578,9 @@ function buildGrid(colorCount = MAX_COLORS, size = 100, style = "bands", maxAtte
 // in device pixels; `dpr` (device pixels per CSS pixel) keeps high-DPI screens sharp.
 function geometry(path, dpr = 1) {
   const wall = Math.max(1, Math.round(path / 4));
-  return {
-    path,
-    wall,
-    dpr,
-    pos: (k) => Math.ceil(k / 2) * wall + Math.floor(k / 2) * path, // left/top edge of row/column k
-    span: (k) => (k % 2 ? path : wall),
-    center: (r, c) => [Math.ceil(c / 2) * wall + Math.floor(c / 2) * path + (c % 2 ? path : wall) / 2,
-                       Math.ceil(r / 2) * wall + Math.floor(r / 2) * path + (r % 2 ? path : wall) / 2],
-  };
+  const pos = (k) => Math.ceil(k / 2) * wall + Math.floor(k / 2) * path; // left/top edge of row/column k
+  const span = (k) => (k % 2 ? path : wall);
+  return { path, wall, dpr, pos, span, center: (r, c) => [pos(c) + span(c) / 2, pos(r) + span(r) / 2] };
 }
 
 // Rows/columns worth drawing. An even-sized grid ends in two all-wall rows and
@@ -595,16 +588,6 @@ function geometry(path, dpr = 1) {
 // the right and bottom borders much thicker than the other walls; leave it out.
 function visibleSize(grid) {
   return grid.length % 2 ? grid.length : grid.length - 1;
-}
-
-function render(grid, canvas, geo, tick = 0) {
-  const size = visibleSize(grid);
-  canvas.width = canvas.height = geo.pos(size);
-  canvas.style.width = `${geo.pos(size) / geo.dpr}px`;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "black";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) drawCell(ctx, grid, r, c, geo, tick);
 }
 
 // The colors a COLOR_CHANGE square flashes between: those of the squares it touches.

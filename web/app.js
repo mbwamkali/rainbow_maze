@@ -303,10 +303,11 @@ function playSound(name, { steps = 1, duration = 0, color = "WHITE", delay = 0 }
   if (!a) return;
   const at = delay / 1000;
   if (name === "step") {
-    // The slide eases out, so square k is reached at 1 - (1 - k/steps)^(1/3) of the way.
+    // A run eases in and out (see frame), so square k is reached at
+    // acos(1 - 2k/steps) / π of the way. A single step ticks right away.
     const ticks = Math.min(steps, 16);
     for (let k = 0; k < ticks; k++) {
-      const when = (1 - (1 - k / ticks) ** (1 / 3)) * duration / 1000;
+      const when = (Math.acos(1 - (2 * k) / ticks) / Math.PI) * duration / 1000;
       tone(a, { freq: 700, to: 560, type: "triangle", at: at + when, length: 0.045, gain: 0.12 });
     }
   } else if (name === "bump") {
@@ -1159,17 +1160,6 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     PLAY_KEYS[key](e);
   }
-});
-// TODO: the Download JSON button is hidden for now. The intent was a way to save
-// a game; revisit as save/load of a round in progress (grid, position, color,
-// moves, trail, time), not just the grid.
-document.getElementById("download").addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(current.grid)], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = "grid.json";
-  link.click();
-  URL.revokeObjectURL(link.href);
 });
 // Fit the maze to the space again, keeping the same zoom relative to "fit".
 function relayout() {

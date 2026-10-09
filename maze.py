@@ -358,8 +358,7 @@ def layout(size, order, rng, style="bands"):
         stack = [(ri, rj)]
         while stack:
             i, j = stack[-1]
-            nxt = [(i + di, j + dj) for di, dj in STEPS
-                   if inside(i + di, j + dj) and band[i + di][j + dj] == b and (i + di, j + dj) not in seen]
+            nxt = [n for n in _lattice_neighbors(m, i, j) if band[n[0]][n[1]] == b and n not in seen]
             if not nxt:
                 stack.pop()
                 continue

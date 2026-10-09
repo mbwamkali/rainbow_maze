@@ -63,6 +63,32 @@ def profile_dir():
     return tempfile.mkdtemp(prefix="rainbow-maze-tests-")
 
 
+def stop_browser(browser, profile):
+    """Stop Firefox and delete its profile, or say how to if this process isn't allowed to.
+
+    Some sandboxes (e.g. Firefox installed as a Snap, run from a confined shell)
+    refuse the signal; then the browser would be left running, so warn instead
+    of failing and keep its profile, which it still has open.
+    """
+    try:
+        os.killpg(browser.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        try:
+            browser.terminate()
+        except PermissionError:
+            print(f"\nWARNING: couldn't stop the test Firefox (pid {browser.pid}); stop it with:\n"
+                  f'  pkill -f "{Path(profile).name}"', file=sys.stderr)
+            return
+    try:
+        browser.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        print(f"\nWARNING: the test Firefox (pid {browser.pid}) didn't exit", file=sys.stderr)
+        return
+    shutil.rmtree(profile, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--browser", default=shutil.which("firefox"), help="path to Firefox")
@@ -90,13 +116,8 @@ def main():
     try:
         finished = Handler.done.wait(args.timeout)
     finally:
-        try:
-            os.killpg(browser.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        browser.wait(timeout=30)
+        stop_browser(browser, profile)
         server.shutdown()
-        shutil.rmtree(profile, ignore_errors=True)
 
     if not finished:
         sys.exit(f"Timed out after {args.timeout:.0f}s waiting for the tests to finish")
