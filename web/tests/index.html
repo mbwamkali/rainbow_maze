@@ -13,9 +13,10 @@
     .pass::before { content: "✓ "; color: #15803d; }
     .fail::before { content: "✗ "; color: #b91c1c; }
     .fail { color: #b91c1c; }
+    .skip::before { content: "– "; color: #71717a; }
     .detail { color: #71717a; margin-left: 8px; }
     /* The app under test runs here, at a fixed size so layouts are repeatable. */
-    iframe { width: 1000px; height: 900px; border: 1px solid #d4d4d8; }
+    iframe { border: 1px solid #d4d4d8; } /* sized per test */
   </style>
 </head>
 <body>

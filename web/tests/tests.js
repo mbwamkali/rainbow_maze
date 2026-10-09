@@ -87,9 +87,12 @@ function installHelpers() {
 }
 
 // Load the app with `query` (e.g. "size=41&colors=4", which builds a maze straight
-// away) and wait for the maze unless `waitForMaze` is false.
-async function openApp(query = "", { waitForMaze = true } = {}) {
+// away) and wait for the maze unless `waitForMaze` is false. `width` and `height`
+// size the app's window (in CSS pixels), e.g. 390 × 844 for a phone.
+async function openApp(query = "", { waitForMaze = true, width = 1000, height = 900 } = {}) {
   const iframe = document.createElement("iframe");
+  iframe.style.width = `${width}px`;
+  iframe.style.height = `${height}px`;
   iframe.src = `../index.html${query ? `?${query}` : ""}`;
   const loaded = new Promise((resolve) => iframe.addEventListener("load", resolve, { once: true }));
   document.getElementById("frames").replaceChildren(iframe);
@@ -307,6 +310,180 @@ test("touch: a swipe runs, a pinch zooms, and ending a pinch doesn't move", asyn
   assert(app.ev("touches.size === 0 && pinch === null"), "the pinch didn't end");
 });
 
+test("sound: muted by default, and each event has its sound", async () => {
+  let app = await openApp("size=41&colors=4");
+  app.ev("localStorage.removeItem(SOUND_KEY)");
+  app = await openApp("size=41&colors=4");
+  // Record which sounds the game asks for (they still play through the real code).
+  app.ev(`T.sounds = []; const realPlay = playSound; playSound = (name, options) => { T.sounds.push(name); realPlay(name, options); };`);
+  assert(app.ev(`sound.muted && muteButton.getAttribute("aria-pressed") === "true"`), "sound should start muted");
+  app.ev(`T.press(T.solutionKey()); T.press(T.blockedKey())`);
+  assert(app.ev("audio === null"), "audio was started while muted");
+
+  app.ev(`T.press("m")`);
+  assert(app.ev(`!sound.muted && muteButton.getAttribute("aria-pressed") === "false"`), "M didn't turn sound on");
+  app.ev(`T.sounds = []; T.press(T.blockedKey()); T.runToEnd()`);
+  const heard = app.ev("T.sounds");
+  for (const name of ["bump", "step", "color", "win"]) assert(heard.includes(name), `no "${name}" sound in ${heard.join(", ")}`);
+  const colorChanges = app.ev("current.palette.length - 1");
+  assert(heard.filter((n) => n === "color").length >= colorChanges, `${heard.filter((n) => n === "color").length} color sounds for ${colorChanges} colors`);
+
+  app.ev(`volumeInput.value = 30; volumeInput.dispatchEvent(new Event("input"))`);
+  assert(app.ev("sound.volume === 30 && !sound.muted"), "the volume slider didn't set the volume");
+  // The choice is remembered on reload.
+  app = await openApp("size=21&colors=3");
+  assert(app.ev("!sound.muted && sound.volume === 30"), "sound settings weren't remembered");
+  app.ev("localStorage.removeItem(SOUND_KEY)");
+});
+
+test("each sound is audible, short, and doesn't clip", async () => {
+  const app = await openApp("", { waitForMaze: false });
+  // Render each sound into a buffer instead of the speakers, at full volume.
+  const results = await app.ev(`(async () => {
+    const out = {};
+    const saved = { audio, muted: sound.muted, volume: sound.volume };
+    Object.assign(sound, { muted: false, volume: 100 });
+    for (const [name, options] of [["step", { steps: 4, duration: 225 }], ["bump", {}], ["color", { color: "CYAN" }], ["win", {}]]) {
+      const ctx = new OfflineAudioContext(1, 44100 * 2, 44100);
+      const master = ctx.createGain();
+      master.connect(ctx.destination);
+      audio = { ctx, master };
+      playSound(name, options);
+      const data = (await ctx.startRendering()).getChannelData(0);
+      let peak = 0, last = 0;
+      data.forEach((v, i) => { if (Math.abs(v) > peak) peak = Math.abs(v); if (Math.abs(v) > 0.001) last = i; });
+      out[name] = { peak: Math.round(peak * 100) / 100, seconds: Math.round((last / 44100) * 100) / 100 };
+    }
+    Object.assign(sound, { muted: saved.muted, volume: saved.volume });
+    audio = saved.audio;
+    return out;
+  })()`);
+  for (const [name, { peak, seconds }] of Object.entries(results)) {
+    assert(peak > 0.05, `${name} is nearly silent (peak ${peak})`);
+    assert(peak < 0.9, `${name} is close to clipping (peak ${peak})`);
+    assert(seconds < 1.2, `${name} lasts ${seconds}s`);
+  }
+});
+
+// Whether this browser reports a touch screen (run.py --mobile).
+const touchScreen = matchMedia("(pointer: coarse)").matches;
+const PHONE = { width: 390, height: 844 };
+const shown = (app, selector) => app.ev(`getComputedStyle(document.querySelector("${selector}")).display !== "none"`);
+
+test("the phone menu appears only on phone-sized touch screens", async () => {
+  // Desktop, and a narrow desktop window: unchanged.
+  for (const size of [{}, PHONE]) {
+    const app = await openApp("size=41&colors=4", size);
+    const phone = touchScreen && size === PHONE;
+    assert(shown(app, "#menu-toggle") === phone, `menu button ${phone ? "missing" : "shown"} at ${size.width || 1000}px`);
+    for (const id of ["undo", "restart", "route"]) {
+      assert(shown(app, `#${id}`) === !phone, `toolbar ${id} ${phone ? "shown" : "hidden"} at ${size.width || 1000}px`);
+    }
+    assert(app.ev("mobileMenu.hidden"), "the menu started open");
+    // The compact header and full screen are phones-only too.
+    assert(shown(app, "#fullscreen") === phone, `full screen button shown=${shown(app, "#fullscreen")}`);
+    for (const selector of ["#back", "#again", "#info", ".view-controls"]) {
+      assert(shown(app, selector) === !phone, `${selector} shown=${shown(app, selector)} at ${size.width || 1000}px`);
+    }
+    assert(app.ev("getComputedStyle(stage).paddingLeft") === (phone ? "0px" : "8px"), "the maze card changed");
+    // The arrow pad shows on touch screens, except on phones until it's switched on.
+    assert(shown(app, "#dpad") === (touchScreen && !phone), `arrow pad shown=${shown(app, "#dpad")}`);
+  }
+});
+
+test("phone: the menu opens and closes, toggles the arrow pad, and runs its actions", async () => {
+  if (!touchScreen) return { skipped: "needs a touch screen (run.py --mobile)" };
+  let app = await openApp("size=41&colors=4", PHONE);
+  app.ev(`localStorage.removeItem(PAD_KEY)`);
+  app = await openApp("size=41&colors=4", PHONE);
+  const canvasHeight = () => app.ev("canvas.getBoundingClientRect().height");
+  const tallBefore = canvasHeight();
+
+  app.ev("menuToggle.click()");
+  assert(!app.ev("mobileMenu.hidden") && app.ev(`menuToggle.getAttribute("aria-expanded")`) === "true", "the menu didn't open");
+  assert(app.ev("menuToggle.textContent") === "✕ Close", `button says "${app.ev("menuToggle.textContent")}"`);
+
+  app.ev("padToggle.click()");
+  assert(shown(app, "#dpad"), "the arrow pad didn't appear");
+  // The maze makes room for the pad: they don't overlap, and both fit on screen.
+  const fit = app.ev(`(() => {
+    const maze = canvas.getBoundingClientRect(), pad = dpad.getBoundingClientRect();
+    return { mazeBottom: maze.bottom, padTop: pad.top, padBottom: pad.bottom, height: innerHeight };
+  })()`);
+  assert(fit.mazeBottom <= fit.padTop && fit.padBottom <= fit.height,
+    `maze ends at ${Math.round(fit.mazeBottom)}px, pad spans ${Math.round(fit.padTop)}-${Math.round(fit.padBottom)}px of ${fit.height}px`);
+  app.ev(`T.from = 0; for (let n = 0; n < 3; n++) T.press(T.solutionKey(), { shiftKey: true });`);
+  const moved = app.ev("moves");
+  app.ev(`document.getElementById("m-undo").click()`);
+  assert(app.ev("moves") < moved, "Undo in the menu didn't undo");
+  app.ev(`document.getElementById("m-route").click()`);
+  assert(app.ev(`overlayKind === "route" && document.getElementById("m-route").textContent === "Hide route"`), "Show route didn't show it");
+  app.ev(`document.getElementById("m-restart").click(); document.getElementById("m-restart").click()`);
+  assert(app.ev("moves === 0"), "Restart (twice) didn't restart");
+
+  // Tapping outside the menu closes it; the pad setting is remembered.
+  app.ev(`document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }))`);
+  assert(app.ev("mobileMenu.hidden"), "tapping outside didn't close the menu");
+  app = await openApp("size=41&colors=4", PHONE);
+  assert(shown(app, "#dpad") && app.ev("padToggle.checked"), "the arrow pad setting wasn't remembered");
+  app.ev(`padToggle.click(); localStorage.removeItem(PAD_KEY)`);
+  assert(!shown(app, "#dpad") && canvasHeight() >= tallBefore - 1, "switching the pad off didn't give the maze its room back");
+});
+
+test("phone: a compact header leaves most of the screen to the maze", async () => {
+  if (!touchScreen) return { skipped: "needs a touch screen (run.py --mobile)" };
+  const app = await openApp("size=61&colors=5", PHONE);
+  const r = app.ev(`(() => {
+    const box = canvas.getBoundingClientRect();
+    return { top: box.top, width: box.width, statusHeight: statusLabel.getBoundingClientRect().height,
+      toolbarHeight: document.querySelector(".toolbar").getBoundingClientRect().height };
+  })()`);
+  assert(r.top < 150, `the maze starts ${Math.round(r.top)}px down`);
+  assert(r.width >= PHONE.width - 2, `the maze is ${Math.round(r.width)}px wide on a ${PHONE.width}px screen`);
+  assert(r.toolbarHeight < 60, `the toolbar is ${Math.round(r.toolbarHeight)}px tall (more than one row)`);
+  assert(r.statusHeight < 30, `the status is ${Math.round(r.statusHeight)}px tall (more than one line)`);
+  // Everything that left the header is in the menu.
+  app.ev("menuToggle.click()");
+  const before = app.ev("geo.path");
+  app.ev(`document.getElementById("m-zoom-in").click()`);
+  assert(app.ev("geo.path") > before, "zoom in from the menu didn't zoom");
+  app.ev(`document.getElementById("m-mute").click()`);
+  assert(app.ev("!sound.muted") && app.ev(`document.getElementById("m-mute").textContent`) === "🔊", "the menu's sound button didn't turn sound on");
+  app.ev(`document.getElementById("m-mute").click(); localStorage.removeItem(SOUND_KEY)`);
+  assert(app.ev(`document.querySelectorAll("#m-info .chip").length`) === 5, "the menu doesn't list the maze's colors");
+  const oldMaze = app.ev("current");
+  app.ev(`document.getElementById("m-new").click()`);
+  await until(() => app.ev("!!current && !building") && app.ev("current") !== oldMaze, 30000, "a new maze");
+  assert(app.ev("mobileMenu.hidden"), "the menu stayed open over the new maze");
+  app.ev(`menuToggle.click(); document.getElementById("m-settings").click()`);
+  assert(app.ev("!setupScreen.hidden && mazeScreen.hidden"), "Change settings didn't go back to the settings");
+});
+
+test("phone: full screen shows only the maze and an exit button under it", async () => {
+  if (!touchScreen) return { skipped: "needs a touch screen (run.py --mobile)" };
+  const app = await openApp("size=61&colors=5", PHONE);
+  app.ev(`document.getElementById("fullscreen").click()`);
+  await sleep(100); // it lays out again on the next frame
+  const r = app.ev(`(() => {
+    const visible = [...mazeScreen.children].filter((el) => getComputedStyle(el).display !== "none").map((el) => el.id);
+    const box = canvas.getBoundingClientRect();
+    const exit = document.getElementById("exit-fullscreen").getBoundingClientRect();
+    return { visible, top: box.top, bottom: box.bottom, width: box.width, exitTop: exit.top, exitBottom: exit.bottom, height: innerHeight };
+  })()`);
+  assert(r.visible.join() === "stage,exit-fullscreen", `showing ${r.visible.join(", ")}`);
+  assert(r.top < 2 && r.width >= PHONE.width - 2, `the maze starts at ${Math.round(r.top)}px and is ${Math.round(r.width)}px wide`);
+  assert(r.exitTop >= r.bottom && r.exitTop - r.bottom < 24, `the exit button is ${Math.round(r.exitTop - r.bottom)}px below the maze`);
+  assert(r.exitBottom <= r.height && r.height - r.exitBottom < 40, `the exit button ends ${Math.round(r.height - r.exitBottom)}px above the bottom`);
+  // Swipes still play in full screen.
+  app.ev(`T.from = 0; T.press(T.solutionKey(), { shiftKey: true })`);
+  assert(app.ev("moves") > 0, "couldn't move in full screen");
+  app.ev(`document.getElementById("exit-fullscreen").click()`);
+  await sleep(100);
+  assert(!app.ev("fullScreen()") && shown(app, ".toolbar") && shown(app, "#status"), "exiting didn't bring the header back");
+  app.ev(`document.getElementById("fullscreen").click(); T.press("Escape")`);
+  assert(!app.ev("fullScreen()"), "Esc didn't leave full screen");
+});
+
 test("a blocked move says why", async () => {
   const app = await openApp("size=41&colors=4&layout=bands");
   // Stand next to an open, colored square in a color that can't walk on it.
@@ -368,29 +545,32 @@ async function runAll() {
   for (const { name, fn } of tests) {
     const started = performance.now();
     let error = null;
+    let outcome = null;
     lastApp = null;
     try {
-      await fn();
+      outcome = await fn();
       if (lastApp?.errors.length) throw new Error(`page error: ${lastApp.errors[0]}`);
     } catch (e) {
       error = e.message || String(e);
     }
     const ms = Math.round(performance.now() - started);
-    results.push({ name, ok: !error, error, ms });
+    results.push({ name, ok: !error, error, ms, skipped: outcome?.skipped });
     const item = document.createElement("li");
-    item.className = error ? "fail" : "pass";
+    item.className = error ? "fail" : outcome?.skipped ? "skip" : "pass";
     item.textContent = name;
     const detail = document.createElement("span");
     detail.className = "detail";
-    detail.textContent = error ? `— ${error}` : `${ms}ms`;
+    detail.textContent = error ? `— ${error}` : outcome?.skipped ? `— skipped: ${outcome.skipped}` : `${ms}ms`;
     item.append(detail);
     list.append(item);
     if (reporting) fetch("/progress", { method: "POST", body: JSON.stringify(results.at(-1)) });
   }
   document.getElementById("frames").replaceChildren();
   const failed = results.filter((r) => !r.ok).length;
+  const skipped = results.filter((r) => r.skipped).length;
   document.getElementById("summary").textContent =
-    failed ? `${failed} of ${results.length} failed` : `All ${results.length} passed`;
+    (failed ? `${failed} of ${results.length} failed` : `All ${results.length - skipped} passed`) +
+    (skipped ? ` (${skipped} skipped)` : "");
   // run.py serves this page and collects the results here.
   if (reporting) {
     await fetch("/results", { method: "POST", body: JSON.stringify(results) });

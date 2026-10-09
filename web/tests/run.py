@@ -2,6 +2,7 @@
 
     python3 web/tests/run.py              # all tests at 1x pixel density
     python3 web/tests/run.py --dpr 2      # as on a high-DPI screen
+    python3 web/tests/run.py --mobile     # as on a touch screen (runs the phone tests)
     python3 web/tests/run.py --browser /path/to/firefox
 
 Serves web/ on a local port, opens the test page in a throwaway Firefox profile,
@@ -37,7 +38,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if "started" in body:
                 print(f"running {body['started']} tests…", flush=True)
             else:
-                print(f"{'ok  ' if body['ok'] else 'FAIL'} {body['name']} ({body['ms']}ms)", flush=True)
+                mark = "skip" if body.get("skipped") else "ok  " if body["ok"] else "FAIL"
+                note = f" — {body['skipped']}" if body.get("skipped") else ""
+                print(f"{mark} {body['name']} ({body['ms']}ms){note}", flush=True)
         elif self.path == "/results":
             Handler.results = body
             Handler.done.set()
@@ -64,6 +67,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--browser", default=shutil.which("firefox"), help="path to Firefox")
     parser.add_argument("--dpr", default="1", help="device pixel ratio to test at (default 1)")
+    parser.add_argument("--mobile", action="store_true", help="report a touch screen, so the phone layout is tested")
     parser.add_argument("--timeout", type=float, default=300, help="seconds to wait for the tests")
     args = parser.parse_args()
     if not args.browser:
@@ -74,10 +78,11 @@ def main():
     url = f"http://127.0.0.1:{server.server_address[1]}/tests/index.html?report"
 
     profile = profile_dir()
-    Path(profile, "user.js").write_text(
-        f'user_pref("layout.css.devPixelsPerPx", "{args.dpr}");\n'
-        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
-    )
+    prefs = {"layout.css.devPixelsPerPx": f'"{args.dpr}"', "browser.shell.checkDefaultBrowser": "false"}
+    if args.mobile:
+        # Pointer capability flags: 1 = coarse (a finger), no fine pointer, no hover.
+        prefs |= {"ui.primaryPointerCapabilities": "1", "ui.allPointerCapabilities": "1"}
+    Path(profile, "user.js").write_text("".join(f'user_pref("{k}", {v});\n' for k, v in prefs.items()))
     browser = subprocess.Popen(
         [args.browser, "--headless", "--no-remote", "--profile", profile, "--window-size=1100,1000", url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
@@ -98,7 +103,10 @@ def main():
     failed = [r for r in Handler.results if not r["ok"]]
     for r in failed:
         print(f"\nFAIL {r['name']}\n     {r['error']}")
-    print(f"\n{len(Handler.results) - len(failed)} passed, {len(failed)} failed (dpr {args.dpr})")
+    skipped = [r for r in Handler.results if r.get("skipped")]
+    passed = len(Handler.results) - len(failed) - len(skipped)
+    mode = f"dpr {args.dpr}" + (", touch screen" if args.mobile else "")
+    print(f"\n{passed} passed, {len(failed)} failed, {len(skipped)} skipped ({mode})")
     sys.exit(1 if failed else 0)
 
 

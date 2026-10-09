@@ -23,13 +23,17 @@ There are two parts:
 
 | | Keyboard | Touch |
 |---|---|---|
-| Move one square | Arrow keys or WASD | Arrow pad below the maze |
+| Move one square | Arrow keys or WASD | Arrow pad below the maze (on phones, switch it on in the menu) |
 | Run to the next turn-off | Shift + arrow | Swipe |
 | Zoom | `+` `−` `0` (fit), mouse wheel | Pinch, or the − / + / Fit buttons |
-| Undo | Z, U, Backspace or Ctrl+Z | Undo button |
-| Restart | R twice | Restart button twice |
-| Hint / show the route | H / Shift + H | Hint / Show route buttons |
+| Undo | Z, U, Backspace or Ctrl+Z | Undo button (in the menu on phones) |
+| Restart | R twice | Restart button twice (in the menu on phones) |
+| Hint / show the route | H / Shift + H | Hint and Show route buttons (Show route is in the menu on phones) |
 | Pause | Esc | |
+| Full screen (phones) | | ⛶ Full screen button; ✕ Exit full screen under the maze |
+
+On phones, the header is compact: ☰ Menu holds undo, restart, the route, new maze,
+settings, sound, zoom and the arrow pad switch.
 
 ## Running the web app
 
@@ -63,6 +67,7 @@ iframe and plays it. To run them in headless Firefox:
 ```sh
 python3 web/tests/run.py            # at normal pixel density
 python3 web/tests/run.py --dpr 2    # as on a high-DPI screen
+python3 web/tests/run.py --mobile   # as on a touch screen, including the phone layout
 ```
 
 To watch them run, serve `web/` as above and open http://localhost:8000/tests/.
