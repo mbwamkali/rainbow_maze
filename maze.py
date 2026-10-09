@@ -15,8 +15,7 @@ Same rules as the web app (web/maze.js):
 - Each pair of neighboring regions touches in exactly floor(log10(size x size))
   places: one COLOR_CHANGE doorway, and openings that the color rules block.
   So there are several ways between two colors, but following the color rules
-  there is exactly one route through the maze. A route never visits the same
-  square twice.
+  there is exactly one route through the maze.
 """
 
 import itertools
@@ -41,13 +40,14 @@ START = "START"
 END = "END"
 # Additive (light) model: primaries red/green/blue, secondaries cyan/magenta/yellow,
 # and white = all primaries combined.
+# Slightly softened from pure (255, 0, 0) etc.; same values as the web app.
 RGB = {
-    "RED": (255, 0, 0),
-    "GREEN": (0, 255, 0),
-    "BLUE": (0, 0, 255),
-    "CYAN": (0, 255, 255),
-    "MAGENTA": (255, 0, 255),
-    "YELLOW": (255, 255, 0),
+    "RED": (230, 57, 70),
+    "GREEN": (47, 191, 113),
+    "BLUE": (58, 111, 247),
+    "CYAN": (34, 195, 214),
+    "MAGENTA": (214, 79, 201),
+    "YELLOW": (245, 204, 42),
     "WHITE": (255, 255, 255),
 }
 # Which primaries make up each color, as bits: red = 1, green = 2, blue = 4.
@@ -621,7 +621,12 @@ def touching_colors(grid, r, c):
 
 def render(grid, path, cell=CELL):
     """Passages (odd rows/columns) are `cell` pixels thick, walls (even ones) a quarter of that."""
+    # An even-sized grid ends in two all-wall rows/columns; the second sits on an
+    # odd (passage-width) index and would make the right and bottom borders thick,
+    # so leave it out (but keep it in cropped previews, where it holds passages).
     size = len(grid)
+    if size % 2 == 0 and all(v == WALL for v in grid[-1]) and all(row[-1] == WALL for row in grid):
+        size -= 1
     wall = max(1, round(cell / 4))
 
     def pos(k):
@@ -629,8 +634,8 @@ def render(grid, path, cell=CELL):
 
     img = Image.new("RGB", (pos(size), pos(size)), "white")
     draw = ImageDraw.Draw(img)
-    for r, row in enumerate(grid):
-        for c, value in enumerate(row):
+    for r, row in enumerate(grid[:size]):
+        for c, value in enumerate(row[:size]):
             box = (pos(c), pos(r), pos(c + 1) - 1, pos(r + 1) - 1)
             if value == WALL:
                 draw.rectangle(box, fill="black")

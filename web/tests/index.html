@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rainbow Maze tests</title>
+  <style>
+    body { margin: 16px; font: 14px/1.5 system-ui, sans-serif; background: #fff; color: #18181b; }
+    h1 { font-size: 1.25rem; margin: 0 0 8px; }
+    #summary { font-weight: 600; margin: 0 0 12px; }
+    #results { list-style: none; padding: 0; margin: 0 0 16px; }
+    #results li { padding: 2px 0; }
+    .pass::before { content: "✓ "; color: #15803d; }
+    .fail::before { content: "✗ "; color: #b91c1c; }
+    .fail { color: #b91c1c; }
+    .detail { color: #71717a; margin-left: 8px; }
+    /* The app under test runs here, at a fixed size so layouts are repeatable. */
+    iframe { width: 1000px; height: 900px; border: 1px solid #d4d4d8; }
+  </style>
+</head>
+<body>
+  <h1>Rainbow Maze tests</h1>
+  <p id="summary">Running…</p>
+  <ul id="results"></ul>
+  <div id="frames"></div>
+  <script src="tests.js"></script>
+</body>
+</html>
