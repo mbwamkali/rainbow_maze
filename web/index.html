@@ -171,6 +171,9 @@
     .sound { display: inline-flex; align-items: center; gap: 6px; }
     #mute { min-width: 44px; padding: 8px 10px; }
     #volume { width: 90px; accent-color: var(--accent); }
+    .corner-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 0.875rem; font-weight: 600; }
+    .corner-switch input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+    @media (pointer: coarse) { .view-controls .corner-switch.touch-only { display: inline-flex; } }
     #route[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
     .zoom button { min-width: 40px; padding: 8px 10px; }
     button:disabled { opacity: 0.5; cursor: default; }
@@ -370,6 +373,7 @@
             <button id="mute" type="button" aria-pressed="true" aria-label="Sound off" title="Sound off (M)">🔇</button>
             <input id="volume" type="range" min="0" max="100" step="5" value="60" aria-label="Volume" title="Volume">
           </span>
+          <label class="corner-switch touch-only" title="Off: a swipe stops at the first bend"><input class="corner-toggle" type="checkbox" role="switch"> Swipes go around corners</label>
           <span class="zoom" role="group" aria-label="Zoom">
             <button id="zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
             <button id="zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
@@ -381,7 +385,7 @@
       <p class="hint">
         <span class="keys-only">Move with <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · hold <kbd>Shift</kbd> to run to the next turn-off · <kbd>Z</kbd> undo · <kbd>R</kbd> restart · <kbd>H</kbd> hint · <kbd>Shift</kbd>+<kbd>H</kbd> route · <kbd>M</kbd> sound · <kbd>N</kbd> map · <kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd> or the mouse wheel to zoom · <kbd>Esc</kbd> for menu</span>
         <span class="touch-only">Swipe to run, tap the arrows to step, pinch to zoom, and drag two fingers to look around</span>
-        <span class="mobile-only">Swipe to run to the next turn-off, pinch to zoom, and drag with two fingers to look around. The menu has undo, restart, the route and an arrow pad.</span>
+        <span class="mobile-only">Swipe to run, pinch to zoom, and drag two fingers to look around. The menu has undo, restart, the route and an arrow pad.</span>
       </p>
       <div id="status"></div>
       <p id="message" role="status" aria-live="polite"></p>
@@ -418,8 +422,9 @@
           <button id="m-zoom-in" type="button" aria-label="Zoom in">+</button>
           <button id="m-zoom-fit" type="button">Fit</button>
         </div>
+        <label class="pad-switch menu-wide"><input class="corner-toggle" type="checkbox" role="switch"> Swipes go around corners</label>
         <div id="m-info" class="menu-wide"></div>
-        <p class="menu-wide menu-tip">Swipe to run to the next turn-off, pinch to zoom, and drag with two fingers to look around.</p>
+        <p class="menu-wide menu-tip">A swipe runs until the corridor turns or branches. Pinch to zoom, and drag two fingers to look around.</p>
       </div>
       <button id="exit-fullscreen" type="button">✕ Exit full screen</button>
     </section>
