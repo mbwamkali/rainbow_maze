@@ -1,4 +1,33 @@
-// UI: a setup screen for maze size and color count, and a screen showing the maze.
+/**
+ * @file The game: the setup screen, the maze screen and everything on it — input
+ * (keys, swipes, pinch, the arrow pad), the camera and zoom, the smiley's
+ * animation, undo, hints, the route, sound, vibration, menus and the win screen.
+ * Uses the rules and drawing code from maze.js.
+ */
+
+/**
+ * A move as a [row, col] step, e.g. [0, 1] for right.
+ * @typedef {[number, number]} Direction
+ */
+
+/**
+ * The part of the maze shown on the canvas, in device pixels.
+ * @typedef {object} View
+ * @property {number} x Left edge, from the maze's left edge.
+ * @property {number} y Top edge, from the maze's top edge.
+ * @property {number} w Width (the canvas width).
+ * @property {number} h Height (the canvas height).
+ */
+
+/**
+ * The result of trying one move: the squares and colors on the way, or why it's blocked.
+ * @typedef {object} MoveTry
+ * @property {Cell} mid The thin square between the two passage squares.
+ * @property {Cell} [next] The passage square landed on, if allowed.
+ * @property {string} [midColor] The player's color on `mid`.
+ * @property {string} [nextColor] The player's color on `next`.
+ * @property {string} [blocked] Why the move isn't allowed ("" for a plain wall).
+ */
 
 const setupScreen = document.getElementById("setup");
 const mazeScreen = document.getElementById("maze");
@@ -60,41 +89,76 @@ const COMFORT_PATH = 20;
 const MAX_PATH = 64;
 const ZOOM_STEP = 1.5;
 
+/** @type {?Maze} The maze being played. */
 let current = null;
-let player = null; // [row, col], always a passage square (odd row and column)
+/** @type {?Cell} Where the player is; always a passage square (odd row and column). */
+let player = null;
+/** @type {string} The player's color. */
 let playerColor = "WHITE";
+/** @type {number} How many times the doorways have flashed. */
 let flashTick = 0;
+/** @type {number} Moves this round; a run counts each square. */
 let moves = 0;
+/** @type {boolean} Whether the player has reached the end. */
 let solved = false;
-let geo = null; // row/column sizes at the current zoom, see geometry()
-let fitPath = 0; // passage width (device pixels) that fits the whole maze on screen
-let view = { x: 0, y: 0, w: 0, h: 0 }; // the part of the maze on the canvas, in device pixels
-let minimapBase = null; // the whole maze at one pixel per square
-let anim = null; // the smiley's current slide or bump, see animate()
+/** @type {?Geometry} Row/column sizes at the current zoom. */
+let geo = null;
+/** @type {number} Passage width (device pixels) that fits the whole maze on screen. */
+let fitPath = 0;
+/** @type {View} The part of the maze on the canvas. */
+let view = { x: 0, y: 0, w: 0, h: 0 };
+/** @type {?HTMLCanvasElement} The whole maze at one pixel per square, for the minimap. */
+let minimapBase = null;
+/** @type {?object} The smiley's current slide or bump; see animate(). */
+let anim = null;
 let messageTimer = 0;
+/** @type {boolean} Whether a maze is being built. */
 let building = false;
+/** @type {number} Counts builds, so a build abandoned via the main menu is ignored. */
 let buildId = 0;
+/** @type {?Worker} The worker building the current maze. */
 let activeWorker = null;
+/** @type {boolean} Set once workers turn out not to work here; then mazes build on the page. */
 let workerBroken = false;
 // One round of play, reset by newRound().
-let history = []; // the state before each move, for undo
-let trail = []; // squares visited, in order (keys from squareKey)
-let visits = new Map(); // square key -> times on the trail
-let overlay = new Set(); // squares marked by a hint or the shown route
-let overlayKind = null; // "hint" or "route"
-let routeCells = []; // the shown route, for the minimap
+/**
+ * The state before each move, for undo.
+ * @type {Array<{player: Cell, color: string, moves: number, trailLength: number}>}
+ */
+let history = [];
+/** @type {number[]} Squares visited, in order (keys from squareKey). */
+let trail = [];
+/** @type {Map<number, number>} Square key -> times on the trail. */
+let visits = new Map();
+/** @type {Set<number>} Squares marked by a hint or the shown route. */
+let overlay = new Set();
+/** @type {?string} What `overlay` shows: "hint" or "route". */
+let overlayKind = null;
+/** @type {Cell[]} The shown route, for the minimap. */
+let routeCells = [];
 let hintTimer = 0;
-let restartArmed = 0; // timeout while waiting for a second Restart press
+/** @type {number} Timeout while waiting for a second Restart press. */
+let restartArmed = 0;
+/**
+ * This round's numbers, for the win screen.
+ * @type {?{presses: number, hints: number, undos: number, routeShown: boolean}}
+ */
 let stats = null;
-let timer = { started: false, since: null, elapsed: 0 }; // ms; since = null while paused
+/** @type {{started: boolean, since: ?number, elapsed: number}} Play time in ms; `since` is null while paused. */
+let timer = { started: false, since: null, elapsed: 0 };
 
+/** "RED" -> "Red". @param {string} color @returns {string} */
 const title = (color) => color[0] + color.slice(1).toLowerCase();
+/** A small colored square, as HTML. @param {string} color @returns {string} */
 const swatch = (color) => `<i class="swatch" style="background:${RGB[color]}" title="${title(color)}"></i>`;
 
 sizeInput.max = MAX_SIZE;
 colorsInput.max = MAX_COLORS;
 
-// Each color needs room for its own region, so the minimum size follows the color count.
+/**
+ * Update the color count's hint and the size limits. Each color needs room for
+ * its own region, so the minimum size follows the color count.
+ */
 function updateHint() {
   const minSize = MIN_SIZE_FOR_COLORS[colorsInput.value];
   colorsHint.textContent = `${COLOR_HINTS[colorsInput.value] || ""} · needs a size of at least ${minSize}`;
@@ -103,6 +167,7 @@ function updateHint() {
   document.getElementById("size-range").textContent = `${minSize}–${MAX_SIZE}`;
 }
 colorsInput.addEventListener("input", updateHint);
+/** Describe the chosen layout under its menu. */
 const updateLayoutHint = () => (layoutHint.textContent = LAYOUT_HINTS[layoutInput.value] || "");
 layoutInput.addEventListener("change", updateLayoutHint);
 updateLayoutHint();
@@ -110,6 +175,11 @@ updateHint();
 
 const advanced = document.getElementById("advanced");
 const presetInputs = [...document.querySelectorAll("input[name=preset]")];
+/**
+ * Fill in the advanced settings from a difficulty preset.
+ *
+ * @param {string} name A key of PRESETS, or "custom" to open the settings instead.
+ */
 function applyPreset(name) {
   const preset = PRESETS[name];
   if (!preset) {
@@ -123,6 +193,7 @@ function applyPreset(name) {
   updateLayoutHint();
 }
 for (const input of presetInputs) input.addEventListener("change", () => applyPreset(input.value));
+/** Select the "Custom" preset (after the settings were edited by hand). */
 const pickCustom = () => (presetInputs.find((input) => input.value === "custom").checked = true);
 for (const input of [sizeInput, colorsInput, layoutInput]) input.addEventListener("input", pickCustom);
 
@@ -153,9 +224,24 @@ for (const icon of document.querySelectorAll("canvas[data-icon]")) {
   }
 }
 
-// Build in a Web Worker so big mazes don't freeze the page. If workers aren't
-// allowed here (some sandboxed pages), build on the main thread instead, after a
-// short pause so the "Building maze…" note gets painted first.
+/**
+ * The release version query (e.g. "?v=1.0.0") from this script's own URL in
+ * index.html, passed on to the worker so every script comes from the same release.
+ * @type {string}
+ */
+const ASSET_VERSION = new URL(document.currentScript.src).search;
+
+/**
+ * Build a maze in a Web Worker so big mazes don't freeze the page.
+ *
+ * If workers aren't allowed here (some sandboxed pages), build on the main
+ * thread instead, after a short pause so the "Building maze…" note gets painted first.
+ *
+ * @param {number} colors How many colors, white included.
+ * @param {number} size Squares per side.
+ * @param {string} style The layout: "bands", "blobs" or "tendrils".
+ * @returns {Promise<Maze>} The maze; rejects with buildGrid()'s error if it can't be built.
+ */
 function buildMaze(colors, size, style) {
   return new Promise((resolve, reject) => {
     const onMainThread = () =>
@@ -169,7 +255,7 @@ function buildMaze(colors, size, style) {
     if (workerBroken) return onMainThread();
     let worker;
     try {
-      worker = new Worker("worker.js");
+      worker = new Worker(`worker.js${ASSET_VERSION}`);
     } catch {
       workerBroken = true;
       return onMainThread();
@@ -191,6 +277,11 @@ function buildMaze(colors, size, style) {
   });
 }
 
+/**
+ * Show or hide the "Building maze…" note, and disable the buttons that need a maze.
+ *
+ * @param {boolean} on Whether a maze is being built.
+ */
 function setBuilding(on) {
   building = on;
   buildingNote.hidden = !on;
@@ -200,6 +291,12 @@ function setBuilding(on) {
   }
 }
 
+/**
+ * Build a new maze from the settings and start playing it. On failure, go back
+ * to the setup screen and show the error there.
+ *
+ * @returns {Promise<void>}
+ */
 async function generate() {
   if (building) return;
   const id = ++buildId;
@@ -251,15 +348,27 @@ try {
 } catch {}
 let audio = null; // { ctx, master }, created on the first sound after unmuting
 
+/** Remember the mute and volume choices in this browser. */
 function saveSound() {
   try {
     localStorage.setItem(SOUND_KEY, JSON.stringify(sound));
   } catch {}
 }
 
-// Perceived loudness grows roughly with the square of the gain.
+/**
+ * The output gain for the chosen volume. Perceived loudness grows roughly with
+ * the square of the gain.
+ *
+ * @returns {number} 0 to 1.
+ */
 const masterGain = () => (sound.volume / 100) ** 2;
 
+/**
+ * The audio context and master volume, created on first use and resumed if the
+ * browser suspended it.
+ *
+ * @returns {?{ctx: AudioContext, master: GainNode}} Null if this browser has no Web Audio.
+ */
 function getAudio() {
   if (!audio) {
     const Context = window.AudioContext || window.webkitAudioContext;
@@ -275,7 +384,18 @@ function getAudio() {
   return audio;
 }
 
-// One note: `freq` gliding to `to` (Hz), starting `at` seconds from now.
+/**
+ * Play one note.
+ *
+ * @param {{ctx: AudioContext, master: GainNode}} a From getAudio().
+ * @param {object} note
+ * @param {number} note.freq Starting pitch in Hz.
+ * @param {number} [note.to=freq] Pitch to glide to, in Hz.
+ * @param {OscillatorType} [note.type="sine"] Waveform.
+ * @param {number} [note.at=0] Seconds from now to start.
+ * @param {number} [note.length=0.1] Seconds long.
+ * @param {number} [note.gain=0.2] Peak loudness, 0 to 1.
+ */
 function tone(a, { freq, to = freq, type = "sine", at = 0, length = 0.1, gain = 0.2 }) {
   const start = a.ctx.currentTime + at;
   const osc = a.ctx.createOscillator();
@@ -293,20 +413,31 @@ function tone(a, { freq, to = freq, type = "sine", at = 0, length = 0.1, gain = 
 
 // Each color has its own note (semitones above C5), so color changes sound different.
 const COLOR_NOTES = { WHITE: 0, RED: 2, YELLOW: 4, GREEN: 5, CYAN: 7, BLUE: 9, MAGENTA: 11 };
+/** The pitch in Hz a number of semitones above C5. @param {number} semitones @returns {number} */
 const note = (semitones) => 523.25 * 2 ** (semitones / 12);
 
-// name: "step" (with steps and duration in ms, one tick per square as the smiley
-// passes it), "bump", "color" (with color, after delay ms), or "win".
+/**
+ * Play a sound effect, unless muted.
+ *
+ * @param {string} name "step" (one tick per square as the smiley passes it),
+ *     "bump", "color" or "win".
+ * @param {object} [options]
+ * @param {number} [options.steps=1] For "step": how many squares the slide covers.
+ * @param {number} [options.duration=0] For "step": how long the slide takes, in ms.
+ * @param {string} [options.color="WHITE"] For "color": the new color, which picks the note.
+ * @param {number} [options.delay=0] Milliseconds from now to start.
+ */
 function playSound(name, { steps = 1, duration = 0, color = "WHITE", delay = 0 } = {}) {
   if (sound.muted || !sound.volume) return;
   const a = getAudio();
   if (!a) return;
   const at = delay / 1000;
   if (name === "step") {
-    // The slide eases out, so square k is reached at 1 - (1 - k/steps)^(1/3) of the way.
+    // A run eases in and out (see frame), so square k is reached at
+    // acos(1 - 2k/steps) / π of the way. A single step ticks right away.
     const ticks = Math.min(steps, 16);
     for (let k = 0; k < ticks; k++) {
-      const when = (1 - (1 - k / ticks) ** (1 / 3)) * duration / 1000;
+      const when = (Math.acos(1 - (2 * k) / ticks) / Math.PI) * duration / 1000;
       tone(a, { freq: 700, to: 560, type: "triangle", at: at + when, length: 0.045, gain: 0.12 });
     }
   } else if (name === "bump") {
@@ -323,6 +454,11 @@ function playSound(name, { steps = 1, duration = 0, color = "WHITE", delay = 0 }
   }
 }
 
+/**
+ * Change the sound settings, save them, and update the controls.
+ *
+ * @param {{muted?: boolean, volume?: number}} changes Volume is 0 to 100.
+ */
 function setSound(changes) {
   Object.assign(sound, changes);
   saveSound();
@@ -330,6 +466,7 @@ function setSound(changes) {
   updateSoundControls();
 }
 
+/** Make the mute buttons and volume sliders match the sound settings. */
 function updateSoundControls() {
   const on = !sound.muted && sound.volume > 0;
   for (const button of [muteButton, document.getElementById("m-mute")]) {
@@ -341,7 +478,7 @@ function updateSoundControls() {
   volumeInput.value = document.getElementById("m-volume").value = sound.volume;
 }
 
-// Back to the start of the current maze with a clean slate.
+/** Go back to the start of the current maze with a clean slate. */
 function newRound() {
   player = corners(current.grid.length)[0];
   playerColor = "WHITE";
@@ -362,37 +499,56 @@ function newRound() {
   updateStatus();
 }
 
+/** A square as one number, for sets and maps. @param {number} r @param {number} c @returns {number} */
 const squareKey = (r, c) => r * current.grid.length + c;
+/** The square for a key from squareKey(). @param {number} key @returns {Cell} */
 const squareOf = (key) => [Math.floor(key / current.grid.length), key % current.grid.length];
 
-// The timer starts with the first move and stops while paused or after winning.
+/** Start or resume the timer. It starts with the first move and stops while paused or after winning. */
 function startTimer() {
   if (!timer.started) timer.started = true;
   if (timer.since === null) timer.since = performance.now();
 }
+/** Pause the timer, keeping the time so far. */
 function pauseTimer() {
   if (timer.since === null) return;
   timer.elapsed += performance.now() - timer.since;
   timer.since = null;
 }
+/** Play time so far, in ms. @returns {number} */
 const elapsed = () => timer.elapsed + (timer.since === null ? 0 : performance.now() - timer.since);
+/**
+ * Format a time as minutes and seconds.
+ *
+ * @param {number} ms The time in ms.
+ * @returns {string} E.g. "2:05".
+ */
 function formatTime(ms) {
   const seconds = Math.floor(ms / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
+/** Show the current play time in the status line. */
 function updateTime() {
   const label = document.getElementById("time");
   if (label) label.textContent = formatTime(elapsed());
 }
 
-// The solution path steps through the thin squares between passages too; a
-// move goes from one passage square to the next, so it covers two of those.
+/**
+ * The fewest moves that solve the maze. The solution path steps through the thin
+ * squares between passages too; a move goes from one passage square to the next,
+ * so it covers two of those.
+ *
+ * @returns {number}
+ */
 const shortestMoves = () => (current.path.length - 1) / 2;
 
-// Size the canvas to the space left on screen and pick the passage width.
-// `path` is the wanted passage width in device pixels, or null for a new maze's
-// default: the whole maze if that's comfortable to play, else zoomed in.
-// All sizes are in device pixels so the maze stays sharp on high-DPI screens.
+/**
+ * Size the canvas to the space left on screen and pick the passage width. All
+ * sizes are in device pixels so the maze stays sharp on high-DPI screens.
+ *
+ * @param {?number} path The wanted passage width in device pixels, or null for a
+ *     new maze's default: the whole maze if that's comfortable to play, else zoomed in.
+ */
 function layoutView(path) {
   const size = visibleSize(current.grid);
   const dpr = window.devicePixelRatio || 1;
@@ -425,7 +581,12 @@ function layoutView(path) {
   canvas.style.height = `${view.h / dpr}px`;
 }
 
-// A view offset {x, y} kept inside the maze, in whole device pixels.
+/**
+ * Keep a view offset inside the maze.
+ *
+ * @param {{x: number, y: number}} spot A view offset in device pixels.
+ * @returns {{x: number, y: number}} The nearest offset that stays inside the maze, in whole pixels.
+ */
 function clampSpot({ x, y }) {
   const mazePx = geo.pos(visibleSize(current.grid));
   return {
@@ -433,10 +594,17 @@ function clampSpot({ x, y }) {
     y: Math.round(Math.min(Math.max(y, 0), mazePx - view.h)),
   };
 }
+/** Keep the view inside the maze. */
 function clampView() {
   Object.assign(view, clampSpot(view));
 }
 
+/**
+ * Jump the view so a point is in the middle (as far as the maze edges allow).
+ *
+ * @param {number} x Device pixels from the maze's left edge.
+ * @param {number} y Device pixels from the maze's top edge.
+ */
 function centerOn(x, y) {
   camTarget = null; // a jump, not a glide
   view.x = x - view.w / 2;
@@ -446,12 +614,22 @@ function centerOn(x, y) {
 
 // On phones the view glides toward the smiley and keeps it nearer the middle;
 // elsewhere it moves in step with the smiley.
-let camTarget = null; // where a gliding view is heading, or null when it's still
+/** @type {?{x: number, y: number}} Where a gliding view is heading, or null when it's still. */
+let camTarget = null;
+/** @type {number} When the glide last moved (a frame timestamp). */
 let camTime = 0;
+/** Whether the view glides (phones, unless reduced motion is asked for). @returns {boolean} */
 const glideCamera = () => mobileView.matches && !reducedMotion.matches;
 
-// Keep the point (x, y) away from the canvas edges: the view only moves once the
-// smiley gets within 30% of an edge (35% on phones). Returns whether the view moved.
+/**
+ * Keep a point away from the canvas edges: the view only moves once the smiley
+ * gets within 30% of an edge (35% on phones, where it glides there).
+ *
+ * @param {number} x Device pixels from the maze's left edge.
+ * @param {number} y Device pixels from the maze's top edge.
+ * @param {number} [now=performance.now()] The frame's timestamp, for gliding.
+ * @returns {boolean} Whether the view moved.
+ */
 function follow(x, y, now = performance.now()) {
   const glide = glideCamera();
   const aim = glide ? { ...(camTarget || view) } : view;
@@ -471,8 +649,13 @@ function follow(x, y, now = performance.now()) {
   return glideStep(now);
 }
 
-// Move a gliding view part of the way to its target: about 60% of the way in
-// 150ms, and at least a pixel, so it eases in without stalling.
+/**
+ * Move a gliding view part of the way to its target: about 60% of the way in
+ * 150ms, and at least a pixel, so it eases in without stalling.
+ *
+ * @param {number} now The frame's timestamp.
+ * @returns {boolean} Whether the view moved.
+ */
 function glideStep(now) {
   if (!camTarget) return false;
   const dt = Math.min(64, Math.max(0, now - camTime) || 16);
@@ -488,27 +671,39 @@ function glideStep(now) {
   return view.x !== oldX || view.y !== oldY;
 }
 
-// Keep a gliding view moving after the smiley stops (the slide draws its own frames).
+/**
+ * Keep a gliding view moving after the smiley stops (the slide draws its own frames).
+ *
+ * @param {number} now The frame's timestamp.
+ */
 function glideFrame(now) {
   if (!camTarget || anim || !current) return;
   if (glideStep(now)) paint();
   if (camTarget) requestAnimationFrame(glideFrame);
 }
+/** Start gliding frames if the view still has somewhere to go. */
 function startGlide() {
   if (!camTarget) return;
   camTime = performance.now();
   requestAnimationFrame(glideFrame);
 }
 
-// The row/column under device-pixel offset `px` (inverse of geo.pos).
+/**
+ * The row or column at a pixel offset (the inverse of geo.pos).
+ *
+ * @param {number} px Device pixels from the maze's top or left edge.
+ * @returns {number} The row or column, kept inside the maze.
+ */
 function indexAt(px) {
   const pair = geo.path + geo.wall;
   const n = Math.floor(px / pair);
   return Math.min(visibleSize(current.grid) - 1, Math.max(0, 2 * n + (px - n * pair >= geo.wall ? 1 : 0)));
 }
 
-// Redraw every square in view (but not the player). The canvas keeps a
-// translation by the view offset, so everything else draws in maze coordinates.
+/**
+ * Redraw every square in view (but not the player). The canvas keeps a
+ * translation by the view offset, so everything else draws in maze coordinates.
+ */
 function paintSquares() {
   const ctx = canvas.getContext("2d");
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -520,9 +715,15 @@ function paintSquares() {
   for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) drawSquare(ctx, r, c);
 }
 
-// A maze square plus what this round adds on top: trail dots where the player
-// has been, and white dots for a hint or the shown route. Dots stay inside the
-// square so redrawing one square never leaves marks on another.
+/**
+ * Draw a maze square plus what this round adds on top: trail dots where the
+ * player has been, and white dots for a hint or the shown route. Dots stay inside
+ * the square so redrawing one square never leaves marks on another.
+ *
+ * @param {CanvasRenderingContext2D} ctx The maze canvas.
+ * @param {number} r Row.
+ * @param {number} c Column.
+ */
 function drawSquare(ctx, r, c) {
   drawCell(ctx, current.grid, r, c, geo, flashTick);
   if (current.grid[r]?.[c] === undefined) return;
@@ -553,10 +754,15 @@ function drawSquare(ctx, r, c) {
   }
 }
 
-// The face shrinks on the start and end squares so their icons show around it.
+/**
+ * How big the face is on a square: smaller on the start and end so their icons show around it.
+ * @param {number} r @param {number} c @returns {number}
+ */
 const faceScale = (r, c) => (current.grid[r]?.[c]?.marker ? 0.65 : 1);
+/** Draw the player, standing still, where they are. @param {CanvasRenderingContext2D} ctx */
 const drawPlayerNow = (ctx) => drawPlayer(ctx, ...player, geo, playerColor, "happy", faceScale(...player));
 
+/** Redraw the view, the player (unless mid-slide) and the minimap. */
 function paint() {
   if (!current) return;
   paintSquares();
@@ -564,7 +770,12 @@ function paint() {
   updateMinimap();
 }
 
-// The whole maze at one pixel per square, drawn once per maze.
+/**
+ * Draw the whole maze at one pixel per square, once per maze, for the minimap.
+ *
+ * @param {Square[][]} grid The maze.
+ * @returns {HTMLCanvasElement} An offscreen canvas.
+ */
 function drawMinimapBase(grid) {
   const size = visibleSize(grid);
   const base = document.createElement("canvas");
@@ -584,7 +795,10 @@ function drawMinimapBase(grid) {
   return base;
 }
 
-// When zoomed in, show the whole maze in a corner with the visible part outlined.
+/**
+ * When zoomed in, show the whole maze in a corner with the visible part
+ * outlined, the route if shown, and the player. When folded, show the Map button instead.
+ */
 function updateMinimap() {
   const size = visibleSize(current.grid);
   const mazePx = geo.pos(size);
@@ -633,10 +847,15 @@ function updateMinimap() {
   placeMap(minimap);
 }
 
-// Keep the map (or the Map button) clear of the smiley: when the smiley comes
-// near it, it moves to the corner farthest from the smiley. Otherwise it stays
-// put, so it doesn't jump back and forth.
+/** The corners the minimap can sit in, as values of the stage's data-map-corner. */
 const MAP_CORNERS = ["top-right", "top-left", "bottom-right", "bottom-left"];
+/**
+ * Keep the map (or the Map button) clear of the smiley: when the smiley comes
+ * near it, it moves to the corner farthest from the smiley. Otherwise it stays
+ * put, so it doesn't jump back and forth.
+ *
+ * @param {HTMLElement} el The minimap, or the Map button when the map is folded.
+ */
 function placeMap(el) {
   const box = canvas.getBoundingClientRect();
   const own = el.getBoundingClientRect();
@@ -659,7 +878,11 @@ function placeMap(el) {
   stage.dataset.mapCorner = MAP_CORNERS.reduce((a, b) => (distance(spot(b)) > distance(spot(a)) ? b : a));
 }
 
-// Change the passage width (device pixels), keeping the player in view.
+/**
+ * Zoom, keeping the player in view.
+ *
+ * @param {number} path The new passage width in device pixels; kept between "fit" and MAX_PATH.
+ */
 function zoomTo(path) {
   if (!current || building) return;
   finishAnimation();
@@ -667,12 +890,17 @@ function zoomTo(path) {
   centerOn(...geo.center(...player));
   paint();
 }
+/** Zoom in one step. */
 const zoomIn = () => geo && zoomTo(Math.round(geo.path * ZOOM_STEP));
+/** Zoom out one step. */
 const zoomOut = () => geo && zoomTo(Math.round(geo.path / ZOOM_STEP));
+/** Zoom out to show the whole maze. */
 const zoomFit = () => zoomTo(fitPath);
 
-// "You are red · walks on ■ ■ · Moves: 12". The swatches are the maze's colors
-// this player can step onto.
+/**
+ * Update the status line: "You are red · walks on ■ ■ · Moves: 12 · Time: 0:42".
+ * The swatches are the maze's colors this player can step onto.
+ */
 function updateStatus() {
   const walkable = current.palette.filter((color) => canEnter(playerColor, color));
   statusLabel.innerHTML =
@@ -682,13 +910,24 @@ function updateStatus() {
     `<span>Time: <b id="time">${formatTime(elapsed())}</b></span>`;
 }
 
+/**
+ * Show a message under the status line for a few seconds.
+ *
+ * @param {string} text The message, or "" to clear it.
+ */
 function showMessage(text) {
   clearTimeout(messageTimer);
   message.textContent = text;
   if (text) messageTimer = setTimeout(() => (message.textContent = ""), 2500);
 }
 
-// Why the player can't step onto `target`, or "" for plain walls.
+/**
+ * Explain why a move is blocked.
+ *
+ * @param {string} color The player's color.
+ * @param {Square} [target] The square they couldn't step onto.
+ * @returns {string} The reason, or "" for plain walls and the maze's edge.
+ */
 function blockedReason(color, target) {
   if (target === WALL || target === undefined) return "";
   if (color === "WHITE") return `White can only walk on white. Find a flashing doorway to take on a color.`;
@@ -708,6 +947,7 @@ setInterval(() => {
   if (!anim) drawPlayerNow(ctx);
 }, 400);
 
+/** @type {Object<string, Direction>} Keys (and pad buttons) to directions. */
 const DIRECTIONS = {
   ArrowUp: [-1, 0],
   ArrowDown: [1, 0],
@@ -718,12 +958,18 @@ const DIRECTIONS = {
   a: [0, -1],
   d: [0, 1],
 };
+/** @type {Direction[]} Up, down, left, right. */
 const DIRECTION_LIST = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
-// One move from passage square `at` in direction [dr, dc], through the thin
-// square in between, for a player of color `color`. Returns the squares and the
-// colors after each, or {blocked: reason} if the color rules don't allow it.
-// Stepping off a COLOR_CHANGE square takes on the color of the next square.
+/**
+ * Try one move from a passage square, through the thin square in between.
+ * Stepping off a COLOR_CHANGE square takes on the color of the next square.
+ *
+ * @param {Cell} at The passage square to move from.
+ * @param {string} color The player's color there.
+ * @param {Direction} dir The way to go.
+ * @returns {MoveTry} The squares and the colors after each, or why it's blocked.
+ */
 function tryMove(at, color, [dr, dc]) {
   const grid = current.grid;
   const mid = [at[0] + dr, at[1] + dc];
@@ -737,10 +983,17 @@ function tryMove(at, color, [dr, dc]) {
   return { mid, next, midColor, nextColor };
 }
 
-// Move one square, or with `run`, keep going along the corridor until a junction,
-// a dead end, a color change, or the end. With `corners` the run follows bends;
-// without, it also stops at the first bend. A blocked first move bumps the
-// smiley and says why.
+/**
+ * Move one square, or run along the corridor.
+ *
+ * A run stops at a junction, a dead end, a color change or the end; without
+ * `corners` it also stops at the first bend. A blocked first move bumps the
+ * smiley and says why.
+ *
+ * @param {Direction} dir The way to go.
+ * @param {boolean} [run=false] Keep going instead of stopping after one square.
+ * @param {boolean} [corners=true] Let a run follow bends.
+ */
 function move(dir, run = false, corners = true) {
   if (solved || building || !current) return;
   finishAnimation();
@@ -801,7 +1054,7 @@ function move(dir, run = false, corners = true) {
   }
 }
 
-// Step back before the last move or run, restoring color, moves and trail.
+/** Step back before the last move or run, restoring color, moves and trail. */
 function undo() {
   if (building || !current || solved || !history.length) return;
   finishAnimation();
@@ -823,7 +1076,7 @@ function undo() {
   updateStatus();
 }
 
-// Restart asks for a second press, since it throws away the round so far.
+/** Start this maze over. Asks for a second press, since it throws away the round so far. */
 function restart() {
   if (building || !current || (moves === 0 && !solved)) return;
   finishAnimation();
@@ -839,13 +1092,19 @@ function restart() {
   paint();
 }
 
-// The shortest way to the end from (at, color), or null. It follows the color
-// rules, so it can pass a square twice in different colors.
+/**
+ * The shortest way to the end. It follows the color rules, so it can pass a
+ * square twice in different colors.
+ *
+ * @param {Cell} at Where to start.
+ * @param {string} color The player's color there.
+ * @returns {?Cell[]} The squares to the end, or null if there's no way from here.
+ */
 function routeFrom(at, color) {
   return solve(current.grid, at, corners(current.grid.length)[1], null, color);
 }
 
-// Mark the next few squares of the way to the end for a few seconds.
+/** Mark the next few squares of the way to the end for a few seconds. */
 function hint() {
   if (building || !current || solved) return;
   finishAnimation();
@@ -871,6 +1130,7 @@ function hint() {
   hintTimer = setTimeout(clearHint, 4000);
 }
 
+/** Remove the hint's marks, if any. */
 function clearHint() {
   clearTimeout(hintTimer);
   if (overlayKind !== "hint") return;
@@ -882,7 +1142,13 @@ function clearHint() {
   if (!anim) drawPlayerNow(ctx);
 }
 
-// Show the whole way to the end from (at, color), on the maze and the minimap.
+/**
+ * Mark the whole way to the end, on the maze and the minimap.
+ *
+ * @param {Cell} at Where to start.
+ * @param {string} color The player's color there.
+ * @param {boolean} [repaint=true] Redraw now; false when the caller repaints anyway.
+ */
 function showRoute(at, color, repaint = true) {
   const route = routeFrom(at, color) || [];
   routeCells = route;
@@ -894,6 +1160,7 @@ function showRoute(at, color, repaint = true) {
   }
 }
 
+/** Show or hide the whole route. */
 function toggleRoute() {
   if (building || !current || solved) return;
   finishAnimation();
@@ -911,6 +1178,11 @@ function toggleRoute() {
   paint();
 }
 
+/**
+ * Make the Show route buttons match whether the route is showing.
+ *
+ * @param {boolean} on Whether the route is showing.
+ */
 function setRouteButton(on) {
   for (const button of [routeButton, document.getElementById("m-route")]) {
     button.setAttribute("aria-pressed", on);
@@ -918,9 +1190,19 @@ function setRouteButton(on) {
   }
 }
 
-// Slide the smiley through `points` (squares), blending between `fills` (colors),
-// or bump it toward `toward` and back. Each frame redraws only `cells`, unless the
-// view has to scroll to keep up, and then it redraws everything in view.
+/**
+ * Slide the smiley along squares, blending between colors, or bump it and back.
+ * Each frame redraws only `cells`, unless the view has to scroll to keep up, and
+ * then it redraws everything in view.
+ *
+ * @param {object} motion
+ * @param {Cell[]} motion.cells The squares the animation can touch.
+ * @param {Cell[]} motion.points The squares to slide through, in order.
+ * @param {string[]} motion.fills The player's color on each of `points`.
+ * @param {Direction} motion.toward The way the player moved (or tried to).
+ * @param {boolean} [motion.bump=false] Bump toward `toward` and back instead of sliding.
+ * @param {number} [motion.steps=1] Passage squares covered, which sets the duration.
+ */
 function animate({ cells, points, fills, toward, bump = false, steps = 1 }) {
   anim = {
     start: performance.now(),
@@ -936,6 +1218,11 @@ function animate({ cells, points, fills, toward, bump = false, steps = 1 }) {
   requestAnimationFrame(frame);
 }
 
+/**
+ * Draw one frame of the current animation, and ask for the next until it's done.
+ *
+ * @param {number} now The frame's timestamp.
+ */
 function frame(now) {
   if (!anim) return;
   // A frame's timestamp is when the browser started the frame, which can be a
@@ -982,6 +1269,7 @@ function frame(now) {
   if (solved && !winMenu.open) showWin();
 }
 
+/** Show the win screen with this round's stats, with sound, vibration and confetti. */
 function showWin() {
   const shortest = shortestMoves();
   const perfect = moves === shortest && !stats.routeShown && !stats.hints;
@@ -1003,7 +1291,7 @@ function showWin() {
   confetti();
 }
 
-// Rainbow confetti over the win screen for a couple of seconds.
+/** Rainbow confetti over the win screen for a couple of seconds. */
 function confetti() {
   if (reducedMotion.matches) return;
   const dpr = window.devicePixelRatio || 1;
@@ -1042,13 +1330,14 @@ function confetti() {
   requestAnimationFrame(tick);
 }
 
-// Jump to the end of the current animation, so quick key presses never lag behind.
+/** Jump to the end of the current animation, so quick key presses never lag behind. */
 function finishAnimation() {
   if (!anim) return;
   anim.duration = 0;
   frame(performance.now());
 }
 
+/** Go back to the setup screen, closing menus and dropping a maze being built. */
 function mainMenu() {
   setMenu(false);
   setFullScreen(false);
@@ -1063,6 +1352,11 @@ function mainMenu() {
   show(setupScreen);
 }
 
+/**
+ * Show one screen and hide the other.
+ *
+ * @param {HTMLElement} screen The setup screen or the maze screen.
+ */
 function show(screen) {
   setupScreen.hidden = screen !== setupScreen;
   mazeScreen.hidden = screen !== mazeScreen;
@@ -1088,7 +1382,7 @@ document.getElementById("win-main").addEventListener("click", mainMenu);
 document.getElementById("zoom-in").addEventListener("click", zoomIn);
 document.getElementById("zoom-out").addEventListener("click", zoomOut);
 document.getElementById("zoom-fit").addEventListener("click", zoomFit);
-// Unmuting (or moving the volume) plays a tick so you can hear the level.
+/** Mute or unmute. Unmuting (or moving the volume) plays a tick so you can hear the level. */
 function toggleMute() {
   setSound({ muted: !sound.muted, volume: sound.volume || 60 });
   playSound("step");
@@ -1116,7 +1410,9 @@ pauseMenu.addEventListener("close", () => {
   if (timer.started && !solved && !mazeScreen.hidden) startTimer();
 });
 
+/** @type {Object<string, function(): void>} Zoom keys. */
 const ZOOM_KEYS = { "+": zoomIn, "=": zoomIn, "-": zoomOut, _: zoomOut, 0: zoomFit };
+/** @type {Object<string, function(KeyboardEvent): void>} Other game keys, by lowercase key name. */
 const PLAY_KEYS = {
   m: toggleMute,
   n: () => foldMinimap(!minimapFolded),
@@ -1160,18 +1456,7 @@ window.addEventListener("keydown", (e) => {
     PLAY_KEYS[key](e);
   }
 });
-// TODO: the Download JSON button is hidden for now. The intent was a way to save
-// a game; revisit as save/load of a round in progress (grid, position, color,
-// moves, trail, time), not just the grid.
-document.getElementById("download").addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(current.grid)], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = "grid.json";
-  link.click();
-  URL.revokeObjectURL(link.href);
-});
-// Fit the maze to the space again, keeping the same zoom relative to "fit".
+/** Fit the maze to the space again (after a resize), keeping the same zoom relative to "fit". */
 function relayout() {
   if (!current || mazeScreen.hidden || building) return;
   finishAnimation();
@@ -1187,11 +1472,22 @@ const PAD_KEY = "rainbow-maze-pad";
 const menuToggle = document.getElementById("menu-toggle");
 const mobileMenu = document.getElementById("mobile-menu");
 const padToggle = document.getElementById("pad-toggle");
+/**
+ * Open or close the phone menu.
+ *
+ * @param {boolean} open Whether it should be open.
+ */
 function setMenu(open) {
   mobileMenu.hidden = !open;
   menuToggle.setAttribute("aria-expanded", String(open));
   menuToggle.textContent = open ? "✕ Close" : "☰ Menu";
 }
+/**
+ * Show or hide the arrow pad on phones.
+ *
+ * @param {boolean} on Whether to show it.
+ * @param {boolean} [save=true] Remember the choice in this browser.
+ */
 function setPad(on, save = true) {
   document.body.classList.toggle("show-pad", on);
   padToggle.checked = on;
@@ -1228,6 +1524,11 @@ let minimapFolded = false;
 try {
   minimapFolded = localStorage.getItem(MAP_KEY) === "folded";
 } catch {}
+/**
+ * Fold the minimap away to a Map button, or bring it back, and remember the choice.
+ *
+ * @param {boolean} folded Whether to fold it.
+ */
 function foldMinimap(folded) {
   minimapFolded = folded;
   try {
@@ -1247,6 +1548,11 @@ let swipeCorners = false;
 try {
   swipeCorners = localStorage.getItem(CORNERS_KEY) === "on";
 } catch {}
+/**
+ * Choose whether swipes follow bends, update both switches, and remember the choice.
+ *
+ * @param {boolean} on Whether swipes go around corners.
+ */
 function setSwipeCorners(on) {
   swipeCorners = on;
   for (const toggle of cornerToggles) toggle.checked = on;
@@ -1268,7 +1574,14 @@ let vibrateOn = true;
 try {
   vibrateOn = localStorage.getItem(VIBRATE_KEY) !== "off";
 } catch {}
+/** Whether this is a touch device that can vibrate. @returns {boolean} */
 const canVibrate = () => touchControls.matches && typeof navigator.vibrate === "function";
+/**
+ * Vibrate, if switched on and supported.
+ *
+ * @param {number | number[]} pattern Milliseconds to vibrate, or on/off/on… durations.
+ * @param {number} [delay=0] Milliseconds from now to start.
+ */
 function buzz(pattern, delay = 0) {
   if (!vibrateOn || !canVibrate()) return;
   setTimeout(() => {
@@ -1277,6 +1590,7 @@ function buzz(pattern, delay = 0) {
     } catch {}
   }, delay);
 }
+/** Show the Vibrate switch only where vibration works, and make it match the setting. */
 function updateVibrateSwitch() {
   document.getElementById("vibrate-switch").hidden = !canVibrate();
   vibrateToggle.checked = vibrateOn;
@@ -1292,8 +1606,14 @@ updateVibrateSwitch();
 
 // Phones: full screen shows only the maze, with a button under it to leave. Where
 // the browser allows it (not on iPhones), this also hides the browser's own bars.
+/** Whether the maze is in (our) full screen. @returns {boolean} */
 const fullScreen = () => document.body.classList.contains("maze-fullscreen");
 let browserFullScreen = false;
+/**
+ * Enter or leave full screen: only the maze, and the browser's full screen where allowed.
+ *
+ * @param {boolean} on Whether to be in full screen.
+ */
 function setFullScreen(on) {
   if (on === fullScreen()) return;
   setMenu(false);
@@ -1339,15 +1659,24 @@ canvas.addEventListener("wheel", (e) => {
 
 // Touch: a swipe runs along the corridor, two fingers pinch to zoom and drag to
 // look around, and holding a pad button steps one square at a time, repeating.
-const touches = new Map(); // pointer id -> [x, y] for fingers on the maze
+/** @type {Map<number, [number, number]>} Pointer id -> [x, y] for fingers on the maze. */
+const touches = new Map();
+/** @type {?[number, number]} Where a one-finger swipe started. */
 let swipeStart = null;
-let pinch = null; // { distance, path, anchor } when two fingers went down
+/**
+ * The two-finger gesture, from when the second finger went down: the finger gap,
+ * the zoom, and the spot under the fingers as a share of the maze's size.
+ * @type {?{distance: number, path: number, anchor: [number, number]}}
+ */
+let pinch = null;
+/** @type {number} The pending pinch frame, or 0. */
 let pinchFrame = 0;
+/** The distance between the two fingers, in CSS pixels. @returns {number} */
 const fingerGap = () => {
   const [[x1, y1], [x2, y2]] = [...touches.values()];
   return Math.hypot(x2 - x1, y2 - y1);
 };
-// The point between the two fingers, on the canvas in device pixels.
+/** The point between the two fingers, on the canvas in device pixels. @returns {[number, number]} */
 const fingerMid = () => {
   const [[x1, y1], [x2, y2]] = [...touches.values()];
   const box = canvas.getBoundingClientRect();
@@ -1391,6 +1720,11 @@ canvas.addEventListener("pointermove", (e) => {
     paint();
   });
 });
+/**
+ * A finger lifted (or was cancelled): end a pinch, or turn a swipe into a move.
+ *
+ * @param {PointerEvent} e The pointerup or pointercancel event.
+ */
 function liftFinger(e) {
   if (!touches.delete(e.pointerId)) return;
   if (pinch) {
@@ -1407,6 +1741,7 @@ function liftFinger(e) {
 canvas.addEventListener("pointerup", liftFinger);
 canvas.addEventListener("pointercancel", liftFinger);
 let repeatTimer = 0;
+/** Stop a held arrow pad button from repeating. */
 const stopRepeat = () => clearTimeout(repeatTimer);
 for (const button of document.querySelectorAll("#dpad button")) {
   const dir = DIRECTIONS[button.dataset.dir];

@@ -115,6 +115,15 @@ test("builds in a Web Worker, and on the main thread when workers are blocked", 
   assert(app.ev("!!current && !building && buildingNote.hidden"), "the main-thread build didn't finish");
 });
 
+test("every script loads from the same release version", async () => {
+  const app = await openApp("size=41&colors=4");
+  const versions = app.ev(`[...document.scripts].map((s) => new URL(s.src).search)`);
+  assert(versions.length === 2 && versions.every((v) => /^\?v=\d+\.\d+\.\d+$/.test(v)), `script versions: ${versions}`);
+  assert(versions[0] === versions[1], `maze.js and app.js have different versions: ${versions}`);
+  assert(app.ev("ASSET_VERSION") === versions[0], "the worker doesn't get the page's version");
+  assert(app.ev("!workerBroken"), "the versioned worker didn't load");
+});
+
 test("outer walls are as thick as the inner walls on even sizes", async () => {
   const app = await openApp("size=40&colors=3");
   app.ev("zoomFit()");

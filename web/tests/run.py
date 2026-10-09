@@ -28,10 +28,19 @@ WEB = Path(__file__).resolve().parent.parent
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    results = None
+    """Serves web/ and receives the test page's progress and results.
+
+    Attributes:
+        results: The test results posted to /results: one dict per test with
+            "name", "ok", "ms", and "error" or "skipped" where they apply.
+        done: Set once the results have arrived.
+    """
+
+    results: list[dict] | None = None
     done = threading.Event()
 
-    def do_POST(self):
+    def do_POST(self) -> None:
+        """Print a finished test (POST /progress) or store all results (POST /results)."""
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/progress":
             # One test finished (or the run started); show it as it happens.
@@ -50,11 +59,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
-    def log_message(self, *args):
+    def log_message(self, *args) -> None:
+        """Keep request logs out of the test output."""
         pass
 
 
-def profile_dir():
+def profile_dir() -> str:
+    """Make a throwaway Firefox profile directory.
+
+    Returns:
+        The new directory's path.
+    """
     # Snap-packaged Firefox can only read profiles under its own snap directory
     # (and /usr/bin/firefox may just be a wrapper that starts the snap).
     snap = Path.home() / "snap" / "firefox" / "common"
@@ -63,7 +78,38 @@ def profile_dir():
     return tempfile.mkdtemp(prefix="rainbow-maze-tests-")
 
 
-def main():
+def stop_browser(browser: subprocess.Popen, profile: str) -> None:
+    """Stop Firefox and delete its profile, or say how to if this process isn't allowed to.
+
+    Some sandboxes (e.g. Firefox installed as a Snap, run from a confined shell)
+    refuse the signal; then the browser would be left running, so warn instead
+    of failing and keep its profile, which it still has open.
+
+    Args:
+        browser: The Firefox process, started in its own process group.
+        profile: Its profile directory, from profile_dir().
+    """
+    try:
+        os.killpg(browser.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        try:
+            browser.terminate()
+        except PermissionError:
+            print(f"\nWARNING: couldn't stop the test Firefox (pid {browser.pid}); stop it with:\n"
+                  f'  pkill -f "{Path(profile).name}"', file=sys.stderr)
+            return
+    try:
+        browser.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        print(f"\nWARNING: the test Firefox (pid {browser.pid}) didn't exit", file=sys.stderr)
+        return
+    shutil.rmtree(profile, ignore_errors=True)
+
+
+def main() -> None:
+    """Run the tests and exit with status 1 if any failed (or they timed out)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--browser", default=shutil.which("firefox"), help="path to Firefox")
     parser.add_argument("--dpr", default="1", help="device pixel ratio to test at (default 1)")
@@ -90,13 +136,8 @@ def main():
     try:
         finished = Handler.done.wait(args.timeout)
     finally:
-        try:
-            os.killpg(browser.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        browser.wait(timeout=30)
+        stop_browser(browser, profile)
         server.shutdown()
-        shutil.rmtree(profile, ignore_errors=True)
 
     if not finished:
         sys.exit(f"Timed out after {args.timeout:.0f}s waiting for the tests to finish")

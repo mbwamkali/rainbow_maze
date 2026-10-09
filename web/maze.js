@@ -1,35 +1,93 @@
-// Maze logic: a grid of walls and colored regions with a guaranteed path from
-// START (upper left) to END (bottom right).
-//
-// Light rules:
-// - The player starts WHITE, which counts as "no color".
-// - A player can always walk on WHITE squares. A colored player can also walk on
-//   any color made only of their own primaries: RED walks on red; MAGENTA
-//   (red + blue) walks on magenta, red and blue, but not green.
-// - COLOR_CHANGE squares are the doorways between regions, placed far from
-//   where the player enters a region. Anyone can step onto one (keeping their
-//   color while on it), and step off it onto any square, in any direction,
-//   taking on that square's color. The new color replaces the old one.
-//   TODO(expert mode): mix instead of replace (red + blue = magenta).
-// - Each non-white color is one connected region, and the player must become
-//   every color to finish.
-// - Each pair of neighboring regions touches in exactly floor(log10(size × size))
-//   places: one COLOR_CHANGE doorway, and openings that the color rules block.
-//   So there are several ways between two colors, but following the color
-//   rules there is exactly one route through the maze.
+/**
+ * @file Maze logic: a grid of walls and colored regions with a guaranteed path
+ * from START (upper left) to END (bottom right), plus the drawing code shared by
+ * the game and the "How to play" icons. Loaded by the page and by worker.js.
+ *
+ * Light rules:
+ * - The player starts WHITE, which counts as "no color".
+ * - A player can always walk on WHITE squares. A colored player can also walk on
+ *   any color made only of their own primaries: RED walks on red; MAGENTA
+ *   (red + blue) walks on magenta, red and blue, but not green.
+ * - COLOR_CHANGE squares are the doorways between regions, placed far from
+ *   where the player enters a region. Anyone can step onto one (keeping their
+ *   color while on it), and step off it onto any square, in any direction,
+ *   taking on that square's color. The new color replaces the old one.
+ *   TODO(expert mode): mix instead of replace (red + blue = magenta).
+ * - Each non-white color is one connected region, and the player must become
+ *   every color to finish.
+ * - Each pair of neighboring regions touches in exactly floor(log10(size × size))
+ *   places: one COLOR_CHANGE doorway, and openings that the color rules block.
+ *   So there are several ways between two colors, but following the color
+ *   rules there is exactly one route through the maze.
+ */
 
+/**
+ * One square of the grid: WALL, COLOR_CHANGE, a color name such as "RED", or a
+ * start/end marker object.
+ * @typedef {string | {color: string, marker: string}} Square
+ */
+
+/**
+ * A grid position as [row, col]. Passages sit on odd rows and columns; the
+ * squares between them are walls or openings.
+ * @typedef {[number, number]} Cell
+ */
+
+/**
+ * A finished maze, as returned by buildGrid().
+ * @typedef {object} Maze
+ * @property {Square[][]} grid Rows of squares.
+ * @property {string[]} palette The colors in the order their regions come, from start to end.
+ * @property {Cell[]} path The shortest solution, square by square.
+ * @property {Cell[]} changers Every COLOR_CHANGE doorway.
+ */
+
+/**
+ * Row and column sizes at one zoom level, in device pixels. Made by geometry().
+ * @typedef {object} Geometry
+ * @property {number} path Width of a passage row or column.
+ * @property {number} wall Width of a wall row or column.
+ * @property {number} dpr Device pixels per CSS pixel.
+ * @property {function(number): number} pos Left/top edge of row or column k.
+ * @property {function(number): number} span Width of row or column k.
+ * @property {function(number, number): [number, number]} center Center [x, y] of the square at (r, c).
+ */
+
+/**
+ * A lattice of `m` × `m` region numbers, one per passage square; region 0 holds
+ * the start and region count - 1 the end.
+ * @typedef {number[][]} RegionMap
+ */
+
+/**
+ * Splits the passage lattice into color regions. All layouts share this shape.
+ * @callback RegionStyle
+ * @param {number} m Lattice nodes per side.
+ * @param {number} count How many regions.
+ * @param {[number, number]} start The start's lattice node.
+ * @param {[number, number]} end The end's lattice node.
+ * @param {number} minTouch How many places each pair of neighboring regions must touch.
+ * @returns {?RegionMap} The regions, or null if this random attempt didn't work out.
+ */
+
+/** A wall square. */
 const WALL = "WALL";
-// Flashes between the colors of the squares it touches.
+/** A doorway between two regions. Flashes between the colors of the squares it touches. */
 const COLOR_CHANGE = "COLOR_CHANGE";
 // Start and end keep their region color and carry a marker:
-//   {color: "WHITE", marker: "START"}   drawn as an X
-//   {color: "BLUE", marker: "END"}      drawn as a circle
+//   {color: "WHITE", marker: "START"}   drawn as a doorway arch
+//   {color: "BLUE", marker: "END"}      drawn as a star
+/** Marker for the start square. */
 const START = "START";
+/** Marker for the end square. */
 const END = "END";
 
-// Additive (light) model: primaries red/green/blue, secondaries cyan/magenta/yellow,
-// and white = all primaries combined.
-// Slightly softened from pure #ff0000 etc., which is harsh next to white.
+/**
+ * Each color's on-screen value. Additive (light) model: primaries red/green/blue,
+ * secondaries cyan/magenta/yellow, and white = all primaries combined.
+ * Slightly softened from pure #ff0000 etc., which is harsh next to white.
+ * @type {Object<string, string>}
+ */
 const RGB = {
   RED: "#e63946",
   GREEN: "#2fbf71",
@@ -39,23 +97,46 @@ const RGB = {
   YELLOW: "#f5cc2a",
   WHITE: "#ffffff",
 };
-// Which primaries make up each color, as bits: red = 1, green = 2, blue = 4.
+/**
+ * Which primaries make up each color, as bits: red = 1, green = 2, blue = 4.
+ * @type {Object<string, number>}
+ */
 const MASK = { RED: 1, GREEN: 2, BLUE: 4, YELLOW: 3, MAGENTA: 5, CYAN: 6, WHITE: 7 };
 const PRIMARY = ["RED", "GREEN", "BLUE"];
 const SECONDARY = ["CYAN", "MAGENTA", "YELLOW"];
 const COLOR_NAMES = Object.keys(RGB);
+/** White plus every primary and secondary. */
 const MAX_COLORS = 1 + PRIMARY.length + SECONDARY.length;
+/** Smallest maze size (squares per side). */
 const MIN_SIZE = 5;
-// Smallest maze that reliably fits one region per color (measured, plus a little margin).
+/**
+ * Smallest maze that reliably fits one region per color (measured, plus a little margin).
+ * @type {Object<number, number>}
+ */
 const MIN_SIZE_FOR_COLORS = { 1: 5, 2: 5, 3: 9, 4: 15, 5: 21, 6: 25, 7: 31 };
+/** Largest maze size (squares per side). */
 const MAX_SIZE = 250;
 
 // TODO: seeded randomness (?seed=…) so a maze can be replayed and shared. Every
 // random draw goes through Math.random, here and in the region layouts below.
+/**
+ * Pick a random item.
+ *
+ * @template T
+ * @param {T[]} items The items to choose from; must not be empty.
+ * @returns {T} One of them.
+ */
 function choice(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
+/**
+ * Shuffle a copy of a list (Fisher–Yates).
+ *
+ * @template T
+ * @param {T[]} items The items to shuffle; left unchanged.
+ * @returns {T[]} A new array with the same items in random order.
+ */
 function shuffle(items) {
   const pool = [...items];
   for (let i = pool.length - 1; i > 0; i--) {
@@ -65,15 +146,21 @@ function shuffle(items) {
   return pool;
 }
 
-// Choose the first `count` colors of this sequence:
-//   1. white
-//   2. red (P1)
-//   3. a secondary containing P1 (S1)
-//   4. the other primary in S1 (P2)
-//   5. the last primary (P3)
-//   6. a secondary containing P3 (S2)
-//   7. the last secondary (S3)
-// This picks which colors are used; regionOrder() decides the order of the regions.
+/**
+ * Choose which colors a maze uses: the first `count` colors of this sequence:
+ *   1. white
+ *   2. red (P1)
+ *   3. a secondary containing P1 (S1)
+ *   4. the other primary in S1 (P2)
+ *   5. the last primary (P3)
+ *   6. a secondary containing P3 (S2)
+ *   7. the last secondary (S3)
+ * regionOrder() then decides the order of the regions.
+ *
+ * @param {number} count How many colors, white included (1 to MAX_COLORS).
+ * @returns {string[]} The colors, starting with "WHITE".
+ * @throws {RangeError} If `count` is out of range.
+ */
 function pickPalette(count) {
   if (!(count >= 1 && count <= MAX_COLORS)) {
     throw new RangeError(`number of colors must be between 1 and ${MAX_COLORS}`);
@@ -88,13 +175,26 @@ function pickPalette(count) {
   return ["WHITE", p1, s1, p2, p3, s2, s3].slice(0, count);
 }
 
+/**
+ * The color of a square, looking inside start/end marker objects.
+ *
+ * @param {Square} value The square.
+ * @returns {string} Its color, or WALL / COLOR_CHANGE as they are.
+ */
 function colorOf(value) {
   return typeof value === "object" ? value.color : value;
 }
 
-// The player's color after moving from square `from` to square `to`, or null
-// if the move isn't allowed. `forbid` names a color the player may not take on
-// (used to check that every color is needed).
+/**
+ * The player's color after moving from one square to the next.
+ *
+ * @param {string} player The player's current color, e.g. "RED".
+ * @param {Square} from The square being left.
+ * @param {Square} to The square being entered.
+ * @param {?string} [forbid=null] A color the player may not take on; used to
+ *     check that every color is needed.
+ * @returns {?string} The new color, or null if the move isn't allowed.
+ */
 function step(player, from, to, forbid = null) {
   if (to === WALL) return null;
   if (to === COLOR_CHANGE) return player;
@@ -102,25 +202,42 @@ function step(player, from, to, forbid = null) {
   return canEnter(player, colorOf(to)) ? player : null;
 }
 
-// Can a player of color `player` step onto a square of color `square`?
+/**
+ * Whether a player of one color may step onto a square of another.
+ *
+ * @param {string} player The player's color.
+ * @param {string} square The square's color.
+ * @returns {boolean} True if the move is allowed.
+ */
 function canEnter(player, square) {
   if (square === "WHITE") return true;
   if (player === "WHITE") return false; // white is "no color"
   return (MASK[square] & ~MASK[player]) === 0;
 }
 
-// Start is the upper-left open cell, end is the bottom-right open cell.
-// Passages sit on odd coordinates, so the outermost usable index is the largest odd one.
+/**
+ * The start and end squares: the upper-left and bottom-right open cells.
+ * Passages sit on odd coordinates, so the outermost usable index is the largest odd one.
+ *
+ * @param {number} size Squares per side.
+ * @returns {[Cell, Cell]} [start, end].
+ */
 function corners(size) {
   const last = size % 2 ? size - 2 : size - 3;
   return [[1, 1], [last, last]];
 }
 
-// Order the non-white colors so each region needs a new color: a color that sits
-// right after one containing it (red after magenta) could be walked through
-// without changing. The first color (red) always comes right after white.
-// Primaries before secondaries always works; shuffling a few times first gives
-// more variety.
+/**
+ * Order the non-white colors so each region needs a new color.
+ *
+ * A color that sits right after one containing it (red after magenta) could be
+ * walked through without changing. The first color (red) always comes right
+ * after white. Primaries before secondaries always works; shuffling a few times
+ * first gives more variety.
+ *
+ * @param {string[]} colors The non-white colors from pickPalette(), red first.
+ * @returns {string[]} The same colors in region order.
+ */
 function regionOrder(colors) {
   const [first, ...rest] = colors;
   if (first === undefined) return [];
@@ -131,9 +248,13 @@ function regionOrder(colors) {
   return [first, ...rest.filter((c) => PRIMARY.includes(c)), ...rest.filter((c) => SECONDARY.includes(c))];
 }
 
-// Split the passage lattice (odd cells) into `count` equal-size bands running
-// diagonally from the upper left to the bottom right, with wavy edges.
-// TODO(expert mode): allow several separate regions per color.
+/**
+ * The "bands" layout: split the lattice into `count` equal-size bands running
+ * diagonally from the upper left to the bottom right, with wavy edges.
+ * TODO(expert mode): allow several separate regions per color.
+ *
+ * @type {RegionStyle}
+ */
 function bandLattice(m, count, start, end, minTouch) {
   const wave = () => ({ amp: (0.35 / count) * Math.random(), freq: 1 + Math.random() * 2, phase: Math.random() * 2 * Math.PI });
   const waves = [wave(), wave()];
@@ -154,11 +275,25 @@ function bandLattice(m, count, start, end, minTouch) {
   return band;
 }
 
+/**
+ * The lattice nodes next to (i, j), up/down/left/right, inside the lattice.
+ *
+ * @param {number} m Lattice nodes per side.
+ * @param {number} i Row.
+ * @param {number} j Column.
+ * @returns {Array<[number, number]>} The neighbors.
+ */
 function latticeNeighbors(m, i, j) {
   return STEPS.map(([di, dj]) => [i + di, j + dj]).filter(([a, b]) => a >= 0 && a < m && b >= 0 && b < m);
 }
 
-// How many lattice-neighbor pairs join each pair of regions, keyed "a,b" with a < b.
+/**
+ * How many lattice-neighbor pairs join each pair of regions.
+ *
+ * @param {number} m Lattice nodes per side.
+ * @param {RegionMap} region The regions.
+ * @returns {Map<string, number>} Counts keyed "a,b" with a < b.
+ */
 function touching(m, region) {
   const touch = new Map();
   for (let i = 0; i < m; i++) {
@@ -174,15 +309,26 @@ function touching(m, region) {
   return touch;
 }
 
+/**
+ * Every ordering of a list.
+ *
+ * @template T
+ * @param {T[]} items The items; keep this short, since there are n! orderings.
+ * @returns {T[][]} All permutations.
+ */
 function permutations(items) {
   if (items.length <= 1) return [items];
   return items.flatMap((x, k) => permutations([...items.slice(0, k), ...items.slice(k + 1)]).map((p) => [x, ...p]));
 }
 
-// Regions grown outward from scattered seed points, like countries on a map.
-// The start's blob comes first and the end's blob last; the blobs in between
-// are put in any order where each blob touches the next in at least `minTouch`
-// places. Returns null if no such order exists.
+/**
+ * The "blobs" layout: regions grown outward from scattered seed points, like
+ * countries on a map. The start's blob comes first and the end's blob last; the
+ * blobs in between are put in any order where each blob touches the next in at
+ * least `minTouch` places. Returns null if no such order exists.
+ *
+ * @type {RegionStyle}
+ */
 function blobLattice(m, count, start, end, minTouch) {
   if (count === 1) return Array.from({ length: m }, () => Array(m).fill(0));
   const dist = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
@@ -231,10 +377,14 @@ function blobLattice(m, count, start, end, minTouch) {
   return null;
 }
 
-// Regions that follow the solution of one big maze, so colors interlock like
-// fingers: carve a maze over the whole lattice, cut its start-to-end path into
-// `count` stretches of about equal weight, and give every dead-end branch the
-// region of the path square it hangs off.
+/**
+ * The "tendrils" layout: regions that follow the solution of one big maze, so
+ * colors interlock like fingers. Carve a maze over the whole lattice, cut its
+ * start-to-end path into `count` stretches of about equal weight, and give every
+ * dead-end branch the region of the path square it hangs off.
+ *
+ * @type {RegionStyle}
+ */
 function tendrilLattice(m, count, start, end, minTouch) {
   const key = (i, j) => i * m + j;
   // One big maze (randomized depth-first search), remembering each square's parent.
@@ -290,12 +440,25 @@ function tendrilLattice(m, count, start, end, minTouch) {
   return region;
 }
 
-// How the board is split into color regions.
+/**
+ * How the board is split into color regions, by layout name.
+ * @type {Object<string, RegionStyle>}
+ */
 const REGION_STYLES = { bands: bandLattice, blobs: blobLattice, tendrils: tendrilLattice };
 
+/** The four moves as [row, col] steps: up, down, left, right. */
 const STEPS = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
-// One attempt at a full layout; returns null if this random layout doesn't work out.
+/**
+ * One attempt at a full layout: split the board into regions, carve each region
+ * as its own maze, and place a COLOR_CHANGE doorway from each region to the next.
+ *
+ * @param {number} size Squares per side.
+ * @param {string[]} order The non-white colors in region order.
+ * @param {string} [style="bands"] A key of REGION_STYLES.
+ * @returns {?{grid: Square[][], changers: Cell[]}} The grid and its doorways, or
+ *     null if this random layout doesn't work out.
+ */
 function layout(size, order, style = "bands") {
   const [start, end] = corners(size);
   const m = (end[1] + 1) / 2; // lattice nodes per side
@@ -327,8 +490,7 @@ function layout(size, order, style = "bands") {
     const stack = [[ri, rj]];
     while (stack.length) {
       const [i, j] = stack[stack.length - 1];
-      const next = STEPS.map(([di, dj]) => [i + di, j + dj])
-        .filter(([ni, nj]) => inside(ni, nj) && band[ni][nj] === b && !seen.has(key(ni, nj)));
+      const next = latticeNeighbors(m, i, j).filter(([ni, nj]) => band[ni][nj] === b && !seen.has(key(ni, nj)));
       if (!next.length) {
         stack.pop();
         continue;
@@ -380,9 +542,17 @@ function layout(size, order, style = "bands") {
   return { grid, changers };
 }
 
-// Breadth-first search over (square, player color). Returns the shortest list of
-// squares from start to end, or null. With `forbid`, the player may never take
-// on that color. `startColor` is the player's color at `start`.
+/**
+ * The shortest route that follows the color rules: a breadth-first search over
+ * (square, player color), so a route may pass a square twice in different colors.
+ *
+ * @param {Square[][]} grid The maze.
+ * @param {Cell} start Where to start.
+ * @param {Cell} end Where to finish.
+ * @param {?string} [forbid=null] A color the player may never take on.
+ * @param {string} [startColor="WHITE"] The player's color at `start`.
+ * @returns {?Cell[]} The squares from start to end, or null if there's no way.
+ */
 function solve(grid, start, end, forbid = null, startColor = "WHITE") {
   const size = grid.length;
   const n = COLOR_NAMES.length;
@@ -414,13 +584,28 @@ function solve(grid, start, end, forbid = null, startColor = "WHITE") {
   return null;
 }
 
-// How many places each pair of neighboring regions must touch.
+/**
+ * How many places each pair of neighboring regions must touch.
+ *
+ * @param {number} size Squares per side.
+ * @returns {number} floor(log10(size × size)).
+ */
 function connectionsPerPair(size) {
   return Math.floor(Math.log10(size * size));
 }
 
-// Squares that could be on a route: everything except dead-end branches, which
-// are trimmed leaf by leaf (start and end are never trimmed).
+/**
+ * The squares that could be on a route: everything except dead-end branches,
+ * which are trimmed leaf by leaf (start and end are never trimmed).
+ *
+ * @param {Square[][]} grid The maze.
+ * @param {Cell} start The start square.
+ * @param {Cell} end The end square.
+ * @returns {{keep: Uint8Array, degree: Uint8Array, neighbors: function(number, number): Cell[],
+ *     fixed: function(number, number): boolean}} `keep` and `degree` are indexed by
+ *     row * size + col; `neighbors` lists a square's kept neighbors and `fixed`
+ *     says whether it's the start or end.
+ */
 function routeSquares(grid, start, end) {
   const size = grid.length;
   const id = (r, c) => r * size + c;
@@ -447,11 +632,19 @@ function routeSquares(grid, start, end) {
   return { keep, degree, neighbors, fixed };
 }
 
-// Count routes from start to end that never revisit a square, stopping at `limit`.
-// With `colored`, a route must also follow the color rules.
-//
-// Squares in dead-end branches can't be on any route, so they're trimmed first.
-// What's left is junctions joined by corridors, and routes are counted over those.
+/**
+ * Count routes from start to end that never revisit a square, stopping at `limit`.
+ *
+ * Squares in dead-end branches can't be on any route, so they're trimmed first.
+ * What's left is junctions joined by corridors, and routes are counted over those.
+ *
+ * @param {Square[][]} grid The maze.
+ * @param {Cell} start The start square.
+ * @param {Cell} end The end square.
+ * @param {boolean} colored Whether a route must also follow the color rules.
+ * @param {number} limit Stop counting once this many routes are found.
+ * @returns {number} The number of routes, at most `limit`.
+ */
 function countSolutions(grid, start, end, colored, limit) {
   const size = grid.length;
   const id = (r, c) => r * size + c;
@@ -511,11 +704,21 @@ function countSolutions(grid, start, end, colored, limit) {
   return count;
 }
 
-// Open walls along the boundary between each pair of neighboring regions until
-// they touch in `connections` places (counting the COLOR_CHANGE doorway). An
-// opening is only kept if there is still exactly one route under the color
-// rules. An opened square takes the color of one side so every color stays one
-// region. Returns false if a boundary can't get enough openings.
+/**
+ * Open walls along the boundary between each pair of neighboring regions until
+ * they touch in `connections` places (counting the COLOR_CHANGE doorway).
+ *
+ * An opening is only kept if there is still exactly one route under the color
+ * rules. An opened square takes the color of one side so every color stays one
+ * region. Changes `grid` in place.
+ *
+ * @param {Square[][]} grid The maze; changed in place.
+ * @param {Cell} start The start square.
+ * @param {Cell} end The end square.
+ * @param {string[]} colors All colors in region order, white first.
+ * @param {number} connections How many places each pair must touch.
+ * @returns {boolean} False if a boundary can't get enough openings.
+ */
 function addOpenings(grid, start, end, colors, connections) {
   const size = grid.length;
   for (let b = 0; b + 1 < colors.length; b++) {
@@ -546,10 +749,21 @@ function addOpenings(grid, start, end, colors, connections) {
   return true;
 }
 
-// Build a maze with START in the upper left and END in the bottom right.
-// A layout is only accepted if every pair of neighboring regions touches in the
-// required number of places, there's exactly one route under the color rules,
-// and it can't be solved without taking on every color.
+/**
+ * Build a maze with START in the upper left and END in the bottom right.
+ *
+ * A layout is only accepted if every pair of neighboring regions touches in the
+ * required number of places, there's exactly one route under the color rules,
+ * and it can't be solved without taking on every color.
+ *
+ * @param {number} [colorCount=MAX_COLORS] How many colors, white included (1 to MAX_COLORS).
+ * @param {number} [size=100] Squares per side (MIN_SIZE to MAX_SIZE).
+ * @param {string} [style="bands"] How the color regions are laid out: a key of REGION_STYLES.
+ * @param {number} [maxAttempts=200] Random layouts to try before giving up.
+ * @returns {Maze} The finished maze.
+ * @throws {RangeError} If the layout, size or color count is out of range.
+ * @throws {Error} If no layout worked within `maxAttempts`.
+ */
 function buildGrid(colorCount = MAX_COLORS, size = 100, style = "bands", maxAttempts = 200) {
   if (!REGION_STYLES[style]) throw new RangeError(`layout must be one of: ${Object.keys(REGION_STYLES).join(", ")}`);
   if (!(Number.isInteger(size) && size >= MIN_SIZE && size <= MAX_SIZE)) {
@@ -574,40 +788,45 @@ function buildGrid(colorCount = MAX_COLORS, size = 100, style = "bands", maxAtte
   throw new Error(`a ${size}×${size} maze is too small for ${colorCount} colors; try a larger size`);
 }
 
-// Passages sit on odd rows/columns and walls on even ones. Walls are drawn about
-// a quarter as thick as passages, so each row/column has its own size. Sizes are
-// in device pixels; `dpr` (device pixels per CSS pixel) keeps high-DPI screens sharp.
+/**
+ * Row and column sizes for drawing at one zoom level.
+ *
+ * Passages sit on odd rows/columns and walls on even ones. Walls are drawn about
+ * a quarter as thick as passages, so each row/column has its own size.
+ *
+ * @param {number} path Passage width in device pixels.
+ * @param {number} [dpr=1] Device pixels per CSS pixel, so high-DPI screens stay sharp.
+ * @returns {Geometry} The sizes and position helpers.
+ */
 function geometry(path, dpr = 1) {
   const wall = Math.max(1, Math.round(path / 4));
-  return {
-    path,
-    wall,
-    dpr,
-    pos: (k) => Math.ceil(k / 2) * wall + Math.floor(k / 2) * path, // left/top edge of row/column k
-    span: (k) => (k % 2 ? path : wall),
-    center: (r, c) => [Math.ceil(c / 2) * wall + Math.floor(c / 2) * path + (c % 2 ? path : wall) / 2,
-                       Math.ceil(r / 2) * wall + Math.floor(r / 2) * path + (r % 2 ? path : wall) / 2],
-  };
+  const pos = (k) => Math.ceil(k / 2) * wall + Math.floor(k / 2) * path; // left/top edge of row/column k
+  const span = (k) => (k % 2 ? path : wall);
+  return { path, wall, dpr, pos, span, center: (r, c) => [pos(c) + span(c) / 2, pos(r) + span(r) / 2] };
 }
 
-// Rows/columns worth drawing. An even-sized grid ends in two all-wall rows and
-// columns, and the second sits on an odd (passage-width) index, which would make
-// the right and bottom borders much thicker than the other walls; leave it out.
+/**
+ * How many rows/columns are worth drawing.
+ *
+ * An even-sized grid ends in two all-wall rows and columns, and the second sits
+ * on an odd (passage-width) index, which would make the right and bottom borders
+ * much thicker than the other walls; leave it out.
+ *
+ * @param {Square[][]} grid The maze.
+ * @returns {number} Rows (and columns) to draw.
+ */
 function visibleSize(grid) {
   return grid.length % 2 ? grid.length : grid.length - 1;
 }
 
-function render(grid, canvas, geo, tick = 0) {
-  const size = visibleSize(grid);
-  canvas.width = canvas.height = geo.pos(size);
-  canvas.style.width = `${geo.pos(size) / geo.dpr}px`;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "black";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) drawCell(ctx, grid, r, c, geo, tick);
-}
-
-// The colors a COLOR_CHANGE square flashes between: those of the squares it touches.
+/**
+ * The colors a COLOR_CHANGE square flashes between: those of the squares it touches.
+ *
+ * @param {Square[][]} grid The maze.
+ * @param {number} r The doorway's row.
+ * @param {number} c The doorway's column.
+ * @returns {string[]} The distinct colors next to it.
+ */
 function touchingColors(grid, r, c) {
   const colors = STEPS.map(([dr, dc]) => grid[r + dr]?.[c + dc])
     .filter((v) => v !== undefined && v !== WALL && v !== COLOR_CHANGE)
@@ -615,8 +834,17 @@ function touchingColors(grid, r, c) {
   return [...new Set(colors)];
 }
 
-// `tick` counts flashes; COLOR_CHANGE squares are striped in the colors they join,
-// and the stripes swap places each tick.
+/**
+ * Draw one square. COLOR_CHANGE squares are striped in the colors they join, and
+ * the stripes swap places each tick.
+ *
+ * @param {CanvasRenderingContext2D} ctx Where to draw.
+ * @param {Square[][]} grid The maze.
+ * @param {number} r Row.
+ * @param {number} c Column.
+ * @param {Geometry} geo Sizes at the current zoom.
+ * @param {number} [tick=0] How many times the doorways have flashed.
+ */
 function drawCell(ctx, grid, r, c, geo, tick = 0) {
   const value = grid[r]?.[c];
   if (value === undefined) return;
@@ -639,15 +867,33 @@ function drawCell(ctx, grid, r, c, geo, tick = 0) {
   if (value.marker) drawMarker(ctx, value.marker, x, y, w);
 }
 
-// Blend two "#rrggbb" colors; t = 0 gives `a`, t = 1 gives `b`.
+/**
+ * Blend two colors.
+ *
+ * @param {string} a A "#rrggbb" color, returned when t = 0.
+ * @param {string} b A "#rrggbb" color, returned when t = 1.
+ * @param {number} t How far from `a` to `b`, 0 to 1.
+ * @returns {string} The blend as "#rrggbb".
+ */
 function mixColor(a, b, t) {
   const channel = (hex, k) => parseInt(hex.slice(1 + 2 * k, 3 + 2 * k), 16);
   const mixed = [0, 1, 2].map((k) => Math.round(channel(a, k) + (channel(b, k) - channel(a, k)) * t));
   return `#${mixed.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 
-// A checkerboard of the colors on either side, two squares deep, so both colors
-// always show and the texture stands out from the solid squares around it.
+/**
+ * Draw a doorway: a checkerboard of the colors on either side, two squares deep,
+ * so both colors always show and the texture stands out from the solid squares
+ * around it.
+ *
+ * @param {CanvasRenderingContext2D} ctx Where to draw.
+ * @param {string[]} colors The colors it joins; the first and last are used.
+ * @param {number} x Left edge in device pixels.
+ * @param {number} y Top edge in device pixels.
+ * @param {number} w Width in device pixels.
+ * @param {number} h Height in device pixels.
+ * @param {number} tick How many times it has flashed; odd ticks swap the colors.
+ */
 function drawDoorway(ctx, colors, x, y, w, h, tick) {
   const [first, second] = [colors[0], colors[colors.length - 1]];
   const deep = Math.min(w, h) >= 4 ? 2 : 1; // squares across the doorway's thin side
@@ -667,9 +913,18 @@ function drawDoorway(ctx, colors, x, y, w, h, tick) {
   }
 }
 
-// The player is a smiley face in their current color, as wide as most of the
-// path and outlined black then white so it reads on every square.
-// `scale` shrinks the face, e.g. so the start and end icons show around it.
+/**
+ * Draw the player on a square: a smiley face in their current color, clipped to
+ * that square so it never paints outside it.
+ *
+ * @param {CanvasRenderingContext2D} ctx Where to draw.
+ * @param {number} r Row.
+ * @param {number} c Column.
+ * @param {Geometry} geo Sizes at the current zoom.
+ * @param {string} [color="WHITE"] The player's color name.
+ * @param {string} [mood="happy"] "happy", or "oops" after a blocked move.
+ * @param {number} [scale=1] Shrinks the face, e.g. so the start and end icons show around it.
+ */
 function drawPlayer(ctx, r, c, geo, color = "WHITE", mood = "happy", scale = 1) {
   ctx.save();
   ctx.beginPath();
@@ -679,8 +934,18 @@ function drawPlayer(ctx, r, c, geo, color = "WHITE", mood = "happy", scale = 1) 
   ctx.restore();
 }
 
-// Draw the face centered on pixel (cx, cy) with fill `fill` (a CSS color).
-// mood "happy" smiles; "oops" (a blocked move) makes a small round mouth.
+/**
+ * Draw the smiley face at any point, e.g. partway through a slide. It's as wide
+ * as most of the path and outlined black then white so it reads on every square.
+ *
+ * @param {CanvasRenderingContext2D} ctx Where to draw.
+ * @param {number} cx Center x in device pixels.
+ * @param {number} cy Center y in device pixels.
+ * @param {{path: number}} geo Sizes at the current zoom; only `path` is used.
+ * @param {string} fill The face color (any CSS color).
+ * @param {string} [mood="happy"] "happy" smiles; "oops" (a blocked move) makes a small round mouth.
+ * @param {number} [scale=1] Shrinks the face.
+ */
 function drawPlayerAt(ctx, cx, cy, geo, fill, mood = "happy", scale = 1) {
   // Keep the face and its outline (1.5 lines past the radius, plus a pixel of
   // anti-aliasing) inside the path, or it leaves marks on the walls beside it.
@@ -714,9 +979,19 @@ function drawPlayerAt(ctx, cx, cy, geo, fill, mood = "happy", scale = 1) {
   ctx.stroke();
 }
 
-// START is a doorway arch and END a star. Each is drawn twice: a wider white
-// stroke underneath gives the black stroke a white outline so it stands out on
-// every color. Both are wider than the player's face is when standing on them.
+/**
+ * Draw the start (a doorway arch) or end (a star) icon on its square.
+ *
+ * Each is drawn twice: a wider white stroke underneath gives the black stroke a
+ * white outline so it stands out on every color. Both are wider than the
+ * player's face is when standing on them.
+ *
+ * @param {CanvasRenderingContext2D} ctx Where to draw.
+ * @param {string} marker START or END.
+ * @param {number} x Left edge in device pixels.
+ * @param {number} y Top edge in device pixels.
+ * @param {number} cell The square's width in device pixels.
+ */
 function drawMarker(ctx, marker, x, y, cell) {
   const width = Math.max(1, cell / 12);
   const halo = Math.max(1, width / 2);
