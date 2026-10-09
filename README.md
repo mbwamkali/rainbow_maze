@@ -4,6 +4,8 @@ A maze where you change color as you go. You start white, step through checkered
 doorways to take on new colors, and each color can only walk on certain squares.
 Reach the star in the bottom right, becoming every color on the way.
 
+**Play it at https://mbwamkali.github.io/rainbow_maze/**
+
 There are two parts:
 
 - **`web/`**, a playable browser game.
@@ -51,7 +53,7 @@ e.g. `?size=41&colors=4&layout=blobs`.
 On a phone, it can be installed to the home screen (Share → Add to Home Screen on
 iPhone, or the browser menu's Install / Add to Home screen on Android). It then opens
 full screen, without the browser's bars. This needs the game served from its own
-address (e.g. GitHub Pages), not embedded in another page.
+address, like the GitHub Pages site above, not embedded in another page.
 
 ## Running the Python generator
 
@@ -76,7 +78,8 @@ python3 web/tests/run.py --mobile   # as on a touch screen, including the phone 
 ```
 
 To watch them run, serve `web/` as above and open http://localhost:8000/tests/.
-They also run on GitHub for every push (`.github/workflows/tests.yml`).
+They also run on GitHub for every push (`.github/workflows/tests.yml`). When they pass
+on `main`, the web app is published to GitHub Pages (`.github/workflows/pages.yml`).
 
 ## Files
 
