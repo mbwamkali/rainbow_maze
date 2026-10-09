@@ -540,12 +540,15 @@ function updateMinimap() {
   const size = visibleSize(current.grid);
   const mazePx = geo.pos(size);
   const zoomed = mazePx > view.w || mazePx > view.h;
-  // On phones the map is smaller, and tapping it folds it away to a Map button.
+  // Clicking or tapping the map folds it away to a Map button. On phones it's smaller.
   const phone = mobileView.matches;
-  const folded = zoomed && phone && minimapFolded;
+  const folded = zoomed && minimapFolded;
   minimap.hidden = !zoomed || folded;
   mapShow.hidden = !folded;
-  if (minimap.hidden) return;
+  if (minimap.hidden) {
+    if (folded) placeMap(mapShow);
+    return;
+  }
   const dpr = geo.dpr;
   const share = phone ? 4 : 3;
   const side = Math.round(Math.min(phone ? 120 : 160, view.w / dpr / share, view.h / dpr / share) * dpr);
@@ -578,6 +581,33 @@ function updateMinimap() {
   ctx.lineWidth = dpr;
   ctx.strokeStyle = "black";
   ctx.stroke();
+  placeMap(minimap);
+}
+
+// Keep the map (or the Map button) clear of the smiley: when the smiley comes
+// near it, it moves to the corner farthest from the smiley. Otherwise it stays
+// put, so it doesn't jump back and forth.
+const MAP_CORNERS = ["top-right", "top-left", "bottom-right", "bottom-left"];
+function placeMap(el) {
+  const box = canvas.getBoundingClientRect();
+  const own = el.getBoundingClientRect();
+  const corner = stage.dataset.mapCorner || "top-right";
+  // The gaps between the map and the canvas edges it sits against (CSS pixels).
+  const gapX = corner.endsWith("left") ? own.left - box.left : box.right - own.right;
+  const gapY = corner.startsWith("bottom") ? box.bottom - own.bottom : own.top - box.top;
+  const spot = (name) => ({
+    x: name.endsWith("left") ? gapX : box.width - gapX - own.width,
+    y: name.startsWith("bottom") ? box.height - gapY - own.height : gapY,
+  });
+  // The smiley's square and some room around it, on the canvas in CSS pixels.
+  const [cx, cy] = geo.center(...player);
+  const [x, y] = [(cx - view.x) / geo.dpr, (cy - view.y) / geo.dpr];
+  const path = geo.path / geo.dpr;
+  const reach = path / 2 + Math.max(24, path * 1.5);
+  const near = (s) => x + reach > s.x && x - reach < s.x + own.width && y + reach > s.y && y - reach < s.y + own.height;
+  if (!near(spot(corner))) return;
+  const distance = (s) => Math.hypot(s.x + own.width / 2 - x, s.y + own.height / 2 - y);
+  stage.dataset.mapCorner = MAP_CORNERS.reduce((a, b) => (distance(spot(b)) > distance(spot(a)) ? b : a));
 }
 
 // Change the passage width (device pixels), keeping the player in view.
@@ -1034,6 +1064,7 @@ pauseMenu.addEventListener("close", () => {
 const ZOOM_KEYS = { "+": zoomIn, "=": zoomIn, "-": zoomOut, _: zoomOut, 0: zoomFit };
 const PLAY_KEYS = {
   m: toggleMute,
+  n: () => foldMinimap(!minimapFolded),
   z: undo,
   u: undo,
   backspace: undo,
@@ -1136,7 +1167,7 @@ const MENU_ACTIONS = [
 ];
 for (const [id, action] of MENU_ACTIONS) document.getElementById(id).addEventListener("click", action);
 
-// Phones: tap the minimap to fold it away, and the Map button to bring it back.
+// Click or tap the minimap (or press N) to fold it away, and the Map button to bring it back.
 const MAP_KEY = "rainbow-maze-minimap";
 let minimapFolded = false;
 try {
@@ -1230,15 +1261,21 @@ canvas.addEventListener("wheel", (e) => {
   (e.deltaY < 0 ? zoomIn : zoomOut)();
 }, { passive: false });
 
-// Touch: a swipe runs along the corridor, two fingers pinch to zoom, and holding
-// a pad button steps one square at a time, repeating.
+// Touch: a swipe runs along the corridor, two fingers pinch to zoom and drag to
+// look around, and holding a pad button steps one square at a time, repeating.
 const touches = new Map(); // pointer id -> [x, y] for fingers on the maze
 let swipeStart = null;
-let pinch = null; // { distance, path } when two fingers went down
+let pinch = null; // { distance, path, anchor } when two fingers went down
 let pinchFrame = 0;
 const fingerGap = () => {
   const [[x1, y1], [x2, y2]] = [...touches.values()];
   return Math.hypot(x2 - x1, y2 - y1);
+};
+// The point between the two fingers, on the canvas in device pixels.
+const fingerMid = () => {
+  const [[x1, y1], [x2, y2]] = [...touches.values()];
+  const box = canvas.getBoundingClientRect();
+  return [((x1 + x2) / 2 - box.left) * geo.dpr, ((y1 + y2) / 2 - box.top) * geo.dpr];
 };
 canvas.addEventListener("pointerdown", (e) => {
   if (e.pointerType === "mouse") return;
@@ -1250,19 +1287,31 @@ canvas.addEventListener("pointerdown", (e) => {
     swipeStart = [e.clientX, e.clientY];
   } else if (touches.size === 2 && geo) {
     swipeStart = null; // a pinch is never a swipe
-    pinch = { distance: Math.max(1, fingerGap()), path: geo.path };
+    // The spot under the fingers, as a share of the maze's width and height, so it
+    // stays under them as they spread (zoom) and move (drag).
+    const mazePx = geo.pos(visibleSize(current.grid));
+    const [mx, my] = fingerMid();
+    pinch = { distance: Math.max(1, fingerGap()), path: geo.path, anchor: [(view.x + mx) / mazePx, (view.y + my) / mazePx] };
   }
 });
 canvas.addEventListener("pointermove", (e) => {
   if (!touches.has(e.pointerId)) return;
   touches.set(e.pointerId, [e.clientX, e.clientY]);
   if (!pinch || touches.size !== 2 || pinchFrame) return;
-  // Zoom at most once per frame; zoomTo keeps the player in view.
+  // Zoom and drag at most once per frame. The next move brings the smiley back
+  // into view if the fingers dragged it out.
   pinchFrame = requestAnimationFrame(() => {
     pinchFrame = 0;
-    if (!pinch || touches.size !== 2) return;
+    if (!pinch || touches.size !== 2 || !current || building) return;
+    finishAnimation();
     const path = Math.round((pinch.path * fingerGap()) / pinch.distance);
-    if (path !== geo.path) zoomTo(path);
+    if (path !== geo.path) layoutView(path);
+    const mazePx = geo.pos(visibleSize(current.grid));
+    const [mx, my] = fingerMid();
+    view.x = pinch.anchor[0] * mazePx - mx;
+    view.y = pinch.anchor[1] * mazePx - my;
+    clampView();
+    paint();
   });
 });
 function liftFinger(e) {
