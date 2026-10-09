@@ -107,7 +107,7 @@ function canEnter(player, square) {
   return (MASK[square] & ~MASK[player]) === 0;
 }
 
-// Start is the upper-right open cell, end is the bottom-left open cell.
+// Start is the upper-left open cell, end is the bottom-right open cell.
 // Passages sit on odd coordinates, so the outermost usable index is the largest odd one.
 function corners(size) {
   const last = size % 2 ? size - 2 : size - 3;
@@ -573,24 +573,36 @@ function buildGrid(colorCount = MAX_COLORS, size = 100, style = "bands", maxAtte
 }
 
 // Passages sit on odd rows/columns and walls on even ones. Walls are drawn about
-// a quarter as thick as passages, so each row/column has its own size.
-function geometry(path) {
+// a quarter as thick as passages, so each row/column has its own size. Sizes are
+// in device pixels; `dpr` (device pixels per CSS pixel) keeps high-DPI screens sharp.
+function geometry(path, dpr = 1) {
   const wall = Math.max(1, Math.round(path / 4));
   return {
     path,
     wall,
+    dpr,
     pos: (k) => Math.ceil(k / 2) * wall + Math.floor(k / 2) * path, // left/top edge of row/column k
     span: (k) => (k % 2 ? path : wall),
+    center: (r, c) => [Math.ceil(c / 2) * wall + Math.floor(c / 2) * path + (c % 2 ? path : wall) / 2,
+                       Math.ceil(r / 2) * wall + Math.floor(r / 2) * path + (r % 2 ? path : wall) / 2],
   };
 }
 
+// Rows/columns worth drawing. An even-sized grid ends in two all-wall rows and
+// columns, and the second sits on an odd (passage-width) index, which would make
+// the right and bottom borders much thicker than the other walls; leave it out.
+function visibleSize(grid) {
+  return grid.length % 2 ? grid.length : grid.length - 1;
+}
+
 function render(grid, canvas, geo, tick = 0) {
-  const size = grid.length;
+  const size = visibleSize(grid);
   canvas.width = canvas.height = geo.pos(size);
+  canvas.style.width = `${geo.pos(size) / geo.dpr}px`;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "black";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  grid.forEach((row, r) => row.forEach((value, c) => drawCell(ctx, grid, r, c, geo, tick)));
+  for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) drawCell(ctx, grid, r, c, geo, tick);
 }
 
 // The colors a COLOR_CHANGE square flashes between: those of the squares it touches.
@@ -625,17 +637,34 @@ function drawCell(ctx, grid, r, c, geo, tick = 0) {
   if (value.marker) drawMarker(ctx, value.marker, x, y, w);
 }
 
+// Blend two "#rrggbb" colors; t = 0 gives `a`, t = 1 gives `b`.
+function mixColor(a, b, t) {
+  const channel = (hex, k) => parseInt(hex.slice(1 + 2 * k, 3 + 2 * k), 16);
+  const mixed = [0, 1, 2].map((k) => Math.round(channel(a, k) + (channel(b, k) - channel(a, k)) * t));
+  return `#${mixed.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
 // The player is a smiley face in their current color, as wide as most of the
-// path and outlined black then white so it reads on every square. On the thin
-// squares between passages it spills into the passage squares on either side.
-function drawPlayer(ctx, r, c, geo, color = "WHITE") {
-  const cx = geo.pos(c) + geo.span(c) / 2;
-  const cy = geo.pos(r) + geo.span(r) / 2;
-  const radius = Math.max(1, geo.path * 0.4);
-  const line = Math.max(1, geo.path / 16);
+// path and outlined black then white so it reads on every square.
+function drawPlayer(ctx, r, c, geo, color = "WHITE", mood = "happy") {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(geo.pos(c), geo.pos(r), geo.span(c), geo.span(r));
+  ctx.clip(); // never paint outside the player's own square
+  drawPlayerAt(ctx, ...geo.center(r, c), geo, RGB[color], mood);
+  ctx.restore();
+}
+
+// Draw the face centered on pixel (cx, cy) with fill `fill` (a CSS color).
+// mood "happy" smiles; "oops" (a blocked move) makes a small round mouth.
+function drawPlayerAt(ctx, cx, cy, geo, fill, mood = "happy") {
+  // Keep the face and its outline (1.5 lines past the radius, plus a pixel of
+  // anti-aliasing) inside the path, or it leaves marks on the walls beside it.
+  const line = Math.max(0.5, geo.path / 16);
+  const radius = Math.max(1, Math.min(geo.path * 0.4, geo.path / 2 - 1.5 * line - 1));
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
-  ctx.fillStyle = RGB[color];
+  ctx.fillStyle = fill;
   ctx.fill();
   ctx.lineWidth = 3 * line;
   ctx.strokeStyle = "white";
@@ -643,7 +672,7 @@ function drawPlayer(ctx, r, c, geo, color = "WHITE") {
   ctx.lineWidth = line;
   ctx.strokeStyle = "black";
   ctx.stroke();
-  if (radius < 4) return; // too small for a face
+  if (radius < 3) return; // too small for a face
   ctx.fillStyle = "black";
   for (const side of [-1, 1]) {
     ctx.beginPath();
@@ -651,9 +680,13 @@ function drawPlayer(ctx, r, c, geo, color = "WHITE") {
     ctx.fill();
   }
   ctx.beginPath();
-  ctx.arc(cx, cy + radius * 0.05, radius * 0.5, 0.15 * Math.PI, 0.85 * Math.PI);
   ctx.lineCap = "round";
   ctx.lineWidth = Math.max(1, radius * 0.12);
+  if (mood === "oops") {
+    ctx.arc(cx, cy + radius * 0.4, radius * 0.16, 0, 2 * Math.PI);
+  } else {
+    ctx.arc(cx, cy + radius * 0.05, radius * 0.5, 0.15 * Math.PI, 0.85 * Math.PI);
+  }
   ctx.stroke();
 }
 

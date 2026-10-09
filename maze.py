@@ -621,7 +621,12 @@ def touching_colors(grid, r, c):
 
 def render(grid, path, cell=CELL):
     """Passages (odd rows/columns) are `cell` pixels thick, walls (even ones) a quarter of that."""
+    # An even-sized grid ends in two all-wall rows/columns; the second sits on an
+    # odd (passage-width) index and would make the right and bottom borders thick,
+    # so leave it out (but keep it in cropped previews, where it holds passages).
     size = len(grid)
+    if size % 2 == 0 and all(v == WALL for v in grid[-1]) and all(row[-1] == WALL for row in grid):
+        size -= 1
     wall = max(1, round(cell / 4))
 
     def pos(k):
@@ -629,8 +634,8 @@ def render(grid, path, cell=CELL):
 
     img = Image.new("RGB", (pos(size), pos(size)), "white")
     draw = ImageDraw.Draw(img)
-    for r, row in enumerate(grid):
-        for c, value in enumerate(row):
+    for r, row in enumerate(grid[:size]):
+        for c, value in enumerate(row[:size]):
             box = (pos(c), pos(r), pos(c + 1) - 1, pos(r + 1) - 1)
             if value == WALL:
                 draw.rectangle(box, fill="black")
