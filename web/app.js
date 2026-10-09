@@ -34,6 +34,14 @@ const COLOR_HINTS = {
   7: "White + all primary and secondary colors",
 };
 
+// Difficulty presets fill in the advanced settings; changing those picks "Custom".
+const PRESETS = {
+  easy: { size: 31, colors: 3, layout: "bands" },
+  medium: { size: 61, colors: 5, layout: "blobs" },
+  hard: { size: 101, colors: 7, layout: "tendrils" },
+  huge: { size: 201, colors: 7, layout: "blobs" },
+};
+
 const LAYOUT_HINTS = {
   bands: "Wavy stripes from the upper left to the bottom right",
   blobs: "Patches like countries on a map; the next color can be in any direction",
@@ -74,6 +82,9 @@ let restartArmed = 0; // timeout while waiting for a second Restart press
 let stats = null;
 let timer = { started: false, since: null, elapsed: 0 }; // ms; since = null while paused
 
+const title = (color) => color[0] + color.slice(1).toLowerCase();
+const swatch = (color) => `<i class="swatch" style="background:${RGB[color]}" title="${title(color)}"></i>`;
+
 sizeInput.max = MAX_SIZE;
 colorsInput.max = MAX_COLORS;
 
@@ -90,6 +101,51 @@ const updateLayoutHint = () => (layoutHint.textContent = LAYOUT_HINTS[layoutInpu
 layoutInput.addEventListener("change", updateLayoutHint);
 updateLayoutHint();
 updateHint();
+
+const advanced = document.getElementById("advanced");
+const presetInputs = [...document.querySelectorAll("input[name=preset]")];
+function applyPreset(name) {
+  const preset = PRESETS[name];
+  if (!preset) {
+    advanced.open = true; // "Custom": show the settings to choose
+    return;
+  }
+  sizeInput.value = preset.size;
+  colorsInput.value = preset.colors;
+  layoutInput.value = preset.layout;
+  updateHint();
+  updateLayoutHint();
+}
+for (const input of presetInputs) input.addEventListener("change", () => applyPreset(input.value));
+const pickCustom = () => (presetInputs.find((input) => input.value === "custom").checked = true);
+for (const input of [sizeInput, colorsInput, layoutInput]) input.addEventListener("input", pickCustom);
+
+// The "How to play" chart and icons come from the same rules and drawing code as the game.
+const CHART_ORDER = ["WHITE", "RED", "GREEN", "BLUE", "YELLOW", "CYAN", "MAGENTA"];
+document.getElementById("walk-chart").innerHTML = CHART_ORDER.map((color) => {
+  const walks = CHART_ORDER.filter((square) => canEnter(color, square));
+  return `<tr><td>${swatch(color)}${color.toLowerCase()}</td><td>${walks.map(swatch).join("")}</td></tr>`;
+}).join("");
+for (const icon of document.querySelectorAll("canvas[data-icon]")) {
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.round(40 * dpr);
+  icon.width = icon.height = size;
+  const ctx = icon.getContext("2d");
+  const kind = icon.dataset.icon;
+  ctx.fillStyle = RGB[kind === "end" ? "BLUE" : "WHITE"];
+  ctx.fillRect(0, 0, size, size);
+  if (kind === "player") {
+    drawPlayerAt(ctx, size / 2, size / 2, { path: size }, RGB.WHITE);
+  } else if (kind === "doorway") {
+    // White on the left, red on the right, and the doorway between them.
+    const bar = Math.round(size / 4);
+    ctx.fillStyle = RGB.RED;
+    ctx.fillRect((size + bar) / 2, 0, size, size);
+    drawDoorway(ctx, ["WHITE", "RED"], Math.round((size - bar) / 2), 0, bar, size, 0);
+  } else {
+    drawMarker(ctx, kind === "start" ? START : END, 0, 0, size);
+  }
+}
 
 // Build in a Web Worker so big mazes don't freeze the page. If workers aren't
 // allowed here (some sandboxed pages), build on the main thread instead, after a
@@ -412,9 +468,6 @@ function zoomTo(path) {
 const zoomIn = () => geo && zoomTo(Math.round(geo.path * ZOOM_STEP));
 const zoomOut = () => geo && zoomTo(Math.round(geo.path / ZOOM_STEP));
 const zoomFit = () => zoomTo(fitPath);
-
-const title = (color) => color[0] + color.slice(1).toLowerCase();
-const swatch = (color) => `<i class="swatch" style="background:${RGB[color]}" title="${title(color)}"></i>`;
 
 // "You are red · walks on ■ ■ · Moves: 12". The swatches are the maze's colors
 // this player can step onto.
@@ -916,6 +969,7 @@ const params = new URLSearchParams(location.search);
 if (params.has("layout")) layoutInput.value = params.get("layout");
 updateLayoutHint();
 if (params.has("size") || params.has("colors") || params.has("layout")) {
+  pickCustom();
   if (params.has("size")) sizeInput.value = params.get("size");
   if (params.has("colors")) colorsInput.value = params.get("colors");
   updateHint();
