@@ -27,6 +27,7 @@ const winMenu = document.getElementById("win-menu");
 const routeButton = document.getElementById("route");
 const confettiCanvas = document.getElementById("confetti");
 const muteButton = document.getElementById("mute");
+const mapShow = document.getElementById("map-show");
 const volumeInput = document.getElementById("volume");
 
 const COLOR_HINTS = {
@@ -396,16 +397,19 @@ function layoutView(path) {
   const size = visibleSize(current.grid);
   const dpr = window.devicePixelRatio || 1;
   const top = stage.getBoundingClientRect().top + window.scrollY;
-  // Room to leave under the maze: the exit button in full screen, else the arrow pad.
+  // Room to leave under the maze: the exit button in full screen, else the arrow
+  // pad, unless the pad sits beside the maze (touch screens held sideways).
   const exitButton = document.getElementById("exit-fullscreen");
+  const padBeside = getComputedStyle(document.querySelector(".play-area")).display === "flex";
   const below = fullScreen()
     ? exitButton.offsetHeight + 16
-    : touchControls.matches ? dpad.offsetHeight + 32 : 16;
+    : touchControls.matches && !padBeside ? dpad.offsetHeight + 32 : 16;
+  const beside = padBeside && dpad.offsetWidth ? dpad.offsetWidth + 16 : 0;
   // The card's padding and border around the canvas (none on phones).
   const box = getComputedStyle(stage);
   const edge = (a, b) => parseFloat(box[`padding${a}`]) + parseFloat(box[`padding${b}`]) +
     parseFloat(box[`border${a}Width`]) + parseFloat(box[`border${b}Width`]);
-  const roomW = Math.max(160, mazeScreen.clientWidth - edge("Left", "Right")) * dpr;
+  const roomW = Math.max(160, mazeScreen.clientWidth - edge("Left", "Right") - beside) * dpr;
   const roomH = Math.max(160, window.innerHeight - top - below - edge("Top", "Bottom")) * dpr;
   const room = Math.min(roomW, roomH);
   fitPath = Math.max(2, Math.floor((room * 1.6) / size));
@@ -536,10 +540,15 @@ function updateMinimap() {
   const size = visibleSize(current.grid);
   const mazePx = geo.pos(size);
   const zoomed = mazePx > view.w || mazePx > view.h;
-  minimap.hidden = !zoomed;
-  if (!zoomed) return;
+  // On phones the map is smaller, and tapping it folds it away to a Map button.
+  const phone = mobileView.matches;
+  const folded = zoomed && phone && minimapFolded;
+  minimap.hidden = !zoomed || folded;
+  mapShow.hidden = !folded;
+  if (minimap.hidden) return;
   const dpr = geo.dpr;
-  const side = Math.round(Math.min(160, view.w / dpr / 3, view.h / dpr / 3) * dpr);
+  const share = phone ? 4 : 3;
+  const side = Math.round(Math.min(phone ? 120 : 160, view.w / dpr / share, view.h / dpr / share) * dpr);
   if (minimap.width !== side) {
     minimap.width = minimap.height = side;
     minimap.style.width = minimap.style.height = `${side / dpr}px`;
@@ -659,6 +668,7 @@ function move(dir, run = false) {
   if (first.blocked !== undefined) {
     showMessage(first.blocked);
     playSound("bump");
+    buzz(25);
     animate({ cells: [player, first.mid], points: [player], fills: [playerColor], toward: dir, bump: true });
     return;
   }
@@ -696,7 +706,10 @@ function move(dir, run = false) {
   animate({ cells, points: cells, fills, toward: dir, steps });
   playSound("step", { steps, duration: anim.duration });
   // A run stops right after a color change, so the change is at the end of the slide.
-  if (color !== playerColor) playSound("color", { color, delay: anim.duration * 0.6 });
+  if (color !== playerColor) {
+    playSound("color", { color, delay: anim.duration * 0.6 });
+    buzz([15, 40, 15], anim.duration * 0.6);
+  }
   player = at;
   playerColor = color;
   moves += steps;
@@ -901,6 +914,7 @@ function showWin() {
   document.getElementById("win-stats").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
   winMenu.showModal();
   playSound("win");
+  buzz([40, 60, 40, 60, 80]);
   confetti();
 }
 
@@ -1121,6 +1135,53 @@ const MENU_ACTIONS = [
   ["m-zoom-fit", zoomFit],
 ];
 for (const [id, action] of MENU_ACTIONS) document.getElementById(id).addEventListener("click", action);
+
+// Phones: tap the minimap to fold it away, and the Map button to bring it back.
+const MAP_KEY = "rainbow-maze-minimap";
+let minimapFolded = false;
+try {
+  minimapFolded = localStorage.getItem(MAP_KEY) === "folded";
+} catch {}
+function foldMinimap(folded) {
+  minimapFolded = folded;
+  try {
+    localStorage.setItem(MAP_KEY, folded ? "folded" : "shown");
+  } catch {}
+  if (current) updateMinimap();
+}
+minimap.addEventListener("click", () => foldMinimap(true));
+mapShow.addEventListener("click", () => foldMinimap(false));
+
+// Vibration on touch devices that support it (Android, not iPhones): a short buzz
+// for a bump, a double one for a color change, and a longer pattern for winning.
+// On by default; the switch is in the phone menu, and the choice is remembered.
+const VIBRATE_KEY = "rainbow-maze-vibrate";
+const vibrateToggle = document.getElementById("vibrate-toggle");
+let vibrateOn = true;
+try {
+  vibrateOn = localStorage.getItem(VIBRATE_KEY) !== "off";
+} catch {}
+const canVibrate = () => touchControls.matches && typeof navigator.vibrate === "function";
+function buzz(pattern, delay = 0) {
+  if (!vibrateOn || !canVibrate()) return;
+  setTimeout(() => {
+    try {
+      navigator.vibrate(pattern);
+    } catch {}
+  }, delay);
+}
+function updateVibrateSwitch() {
+  document.getElementById("vibrate-switch").hidden = !canVibrate();
+  vibrateToggle.checked = vibrateOn;
+}
+vibrateToggle.addEventListener("change", () => {
+  vibrateOn = vibrateToggle.checked;
+  try {
+    localStorage.setItem(VIBRATE_KEY, vibrateOn ? "on" : "off");
+  } catch {}
+  buzz(25); // so you can feel it's on
+});
+updateVibrateSwitch();
 
 // Phones: full screen shows only the maze, with a button under it to leave. Where
 // the browser allows it (not on iPhones), this also hides the browser's own bars.

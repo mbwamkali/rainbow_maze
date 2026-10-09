@@ -4,6 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Rainbow Maze</title>
+  <!-- Installing to the home screen (runs without the browser's bars). -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Rainbow Maze">
+  <meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#18181b" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7'/%3E%3Cpath d='M6 9h20M6 16h20M6 23h20' stroke-width='5' stroke='%23e63946'/%3E%3Cpath d='M6 16h20' stroke-width='5' stroke='%232fbf71'/%3E%3Cpath d='M6 23h20' stroke-width='5' stroke='%233a6ff7'/%3E%3Ccircle cx='22' cy='9' r='3.2' fill='%23fff' stroke='%23000' stroke-width='1.2'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -209,6 +217,18 @@
     #m-info { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
     .menu-tip { margin: 0; color: var(--muted); font-size: 0.875rem; }
     #fullscreen, #exit-fullscreen { display: none; }
+    .play-area { display: contents; }
+    #map-show {
+      position: absolute; top: 16px; right: 16px; padding: 6px 10px;
+      box-shadow: 0 1px 6px rgb(0 0 0 / 0.4);
+    }
+    #map-show[hidden], #vibrate-switch[hidden] { display: none; }
+    .menu-row .pad-switch { flex: 2; }
+    /* Touch screens held sideways: the arrow pad goes beside the maze, not under it. */
+    @media (pointer: coarse) and (orientation: landscape) {
+      .play-area { display: flex; align-items: center; justify-content: flex-start; gap: 16px; }
+      .play-area #dpad { margin-top: 0; }
+    }
     .pad-switch {
       display: flex; align-items: center; justify-content: center; gap: 10px;
       border: 1px solid var(--border); border-radius: 8px; font-weight: 600;
@@ -235,10 +255,13 @@
       #message { min-height: 1.3em; margin: 2px 8px 4px; font-size: 0.85rem; }
       #stage { padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; margin: 0 auto; }
       #building { border-radius: 0; }
+      /* A smaller minimap; tap it to fold it away to a Map button. */
+      #minimap { pointer-events: auto; cursor: pointer; }
 
       /* Full screen: only the maze, and a button under it to leave. */
       body.maze-fullscreen main:has(> #maze) { padding: 0; max-width: none; } /* beats the compact header's padding */
-      body.maze-fullscreen #maze > :not(#stage):not(#exit-fullscreen) { display: none !important; }
+      body.maze-fullscreen #maze > :not(.play-area):not(#exit-fullscreen),
+      body.maze-fullscreen .play-area > :not(#stage) { display: none !important; }
       body.maze-fullscreen #exit-fullscreen {
         display: block; width: calc(100% - 16px); min-height: 48px;
         margin: 8px auto max(8px, env(safe-area-inset-bottom));
@@ -362,10 +385,21 @@
       </p>
       <div id="status"></div>
       <p id="message" role="status" aria-live="polite"></p>
-      <div id="stage">
-        <canvas id="canvas"></canvas>
-        <canvas id="minimap" hidden aria-hidden="true"></canvas>
-        <div id="building" hidden role="status"><span>Building maze…</span></div>
+      <!-- The maze and the arrow pad: below each other, or side by side on touch
+           screens held sideways (see .play-area). -->
+      <div class="play-area">
+        <div id="stage">
+          <canvas id="canvas"></canvas>
+          <canvas id="minimap" hidden aria-hidden="true"></canvas>
+          <button id="map-show" type="button" hidden aria-label="Show the map">🗺 Map</button>
+          <div id="building" hidden role="status"><span>Building maze…</span></div>
+        </div>
+        <div id="dpad" aria-label="Move">
+          <button type="button" data-dir="ArrowUp" aria-label="Up">↑</button>
+          <button type="button" data-dir="ArrowLeft" aria-label="Left">←</button>
+          <button type="button" data-dir="ArrowRight" aria-label="Right">→</button>
+          <button type="button" data-dir="ArrowDown" aria-label="Down">↓</button>
+        </div>
       </div>
       <div id="mobile-menu" hidden role="group" aria-label="Game menu">
         <label class="pad-switch"><input id="pad-toggle" type="checkbox" role="switch"> Arrow pad</label>
@@ -377,6 +411,7 @@
         <div class="menu-row" role="group" aria-label="Sound">
           <button id="m-mute" type="button" aria-label="Sound off">🔇</button>
           <input id="m-volume" type="range" min="0" max="100" step="5" value="60" aria-label="Volume">
+          <label id="vibrate-switch" class="pad-switch" hidden><input id="vibrate-toggle" type="checkbox" role="switch"> Vibrate</label>
         </div>
         <div class="menu-row" role="group" aria-label="Zoom">
           <button id="m-zoom-out" type="button" aria-label="Zoom out">−</button>
@@ -387,12 +422,6 @@
         <p class="menu-wide menu-tip">Swipe to run to the next turn-off and pinch to zoom.</p>
       </div>
       <button id="exit-fullscreen" type="button">✕ Exit full screen</button>
-      <div id="dpad" aria-label="Move">
-        <button type="button" data-dir="ArrowUp" aria-label="Up">↑</button>
-        <button type="button" data-dir="ArrowLeft" aria-label="Left">←</button>
-        <button type="button" data-dir="ArrowRight" aria-label="Right">→</button>
-        <button type="button" data-dir="ArrowDown" aria-label="Down">↓</button>
-      </div>
     </section>
   </main>
 

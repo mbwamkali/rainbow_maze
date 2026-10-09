@@ -48,6 +48,11 @@ python3 -m http.server -d web
 Then open http://localhost:8000. To skip the setup screen, add settings to the URL,
 e.g. `?size=41&colors=4&layout=blobs`.
 
+On a phone, it can be installed to the home screen (Share → Add to Home Screen on
+iPhone, or the browser menu's Install / Add to Home screen on Android). It then opens
+full screen, without the browser's bars. This needs the game served from its own
+address (e.g. GitHub Pages), not embedded in another page.
+
 ## Running the Python generator
 
 ```sh
@@ -81,5 +86,6 @@ They also run on GitHub for every push (`.github/workflows/tests.yml`).
 | `web/maze.js` | Maze rules, generation, solving and drawing (shared with the worker) |
 | `web/app.js` | The game: input, camera and zoom, animation, undo, hints, win screen |
 | `web/worker.js` | Builds mazes off the main thread |
+| `web/manifest.webmanifest`, `web/icons/` | For installing to a phone's home screen |
 | `web/tests/` | Browser tests and their runner |
 | `maze.py` | The Python generator |

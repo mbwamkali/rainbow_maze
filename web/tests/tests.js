@@ -386,6 +386,7 @@ test("the phone menu appears only on phone-sized touch screens", async () => {
       assert(shown(app, selector) === !phone, `${selector} shown=${shown(app, selector)} at ${size.width || 1000}px`);
     }
     assert(app.ev("getComputedStyle(stage).paddingLeft") === (phone ? "0px" : "8px"), "the maze card changed");
+    assert(app.ev(`getComputedStyle(minimap).pointerEvents`) === (phone ? "auto" : "none"), "the minimap's tap changed");
     // The arrow pad shows on touch screens, except on phones until it's switched on.
     assert(shown(app, "#dpad") === (touchScreen && !phone), `arrow pad shown=${shown(app, "#dpad")}`);
   }
@@ -465,7 +466,9 @@ test("phone: full screen shows only the maze and an exit button under it", async
   app.ev(`document.getElementById("fullscreen").click()`);
   await sleep(100); // it lays out again on the next frame
   const r = app.ev(`(() => {
-    const visible = [...mazeScreen.children].filter((el) => getComputedStyle(el).display !== "none").map((el) => el.id);
+    // Children of the maze screen, looking inside the .play-area wrapper (display: contents).
+    const kids = [...mazeScreen.children].flatMap((el) => el.classList.contains("play-area") ? [...el.children] : [el]);
+    const visible = kids.filter((el) => getComputedStyle(el).display !== "none").map((el) => el.id);
     const box = canvas.getBoundingClientRect();
     const exit = document.getElementById("exit-fullscreen").getBoundingClientRect();
     return { visible, top: box.top, bottom: box.bottom, width: box.width, exitTop: exit.top, exitBottom: exit.bottom, height: innerHeight };
@@ -482,6 +485,83 @@ test("phone: full screen shows only the maze and an exit button under it", async
   assert(!app.ev("fullScreen()") && shown(app, ".toolbar") && shown(app, "#status"), "exiting didn't bring the header back");
   app.ev(`document.getElementById("fullscreen").click(); T.press("Escape")`);
   assert(!app.ev("fullScreen()"), "Esc didn't leave full screen");
+});
+
+test("touch screens held sideways put the arrow pad beside the maze", async () => {
+  // Without a touch screen the pad is hidden and nothing moves.
+  const place = (app) => app.ev(`(() => {
+    const maze = canvas.getBoundingClientRect(), pad = dpad.getBoundingClientRect();
+    return { mazeRight: maze.right, mazeBottom: maze.bottom, mazeHeight: maze.height,
+      padLeft: pad.left, padTop: pad.top, padShown: getComputedStyle(dpad).display !== "none",
+      area: getComputedStyle(document.querySelector(".play-area")).display };
+  })()`);
+  const sideways = place(await openApp("size=61&colors=5", { width: 820, height: 600 }));
+  if (!touchScreen) {
+    assert(sideways.area === "contents" && !sideways.padShown, `desktop layout changed: ${JSON.stringify(sideways)}`);
+    return;
+  }
+  assert(sideways.padShown && sideways.padLeft >= sideways.mazeRight, `pad at ${Math.round(sideways.padLeft)}px, maze ends at ${Math.round(sideways.mazeRight)}px`);
+  assert(sideways.mazeHeight > 300, `the maze is only ${Math.round(sideways.mazeHeight)}px tall`);
+  const upright = place(await openApp("size=61&colors=5", { width: 820, height: 1100 }));
+  assert(upright.padTop >= upright.mazeBottom, "held upright, the pad should stay under the maze");
+});
+
+test("phone: the minimap is smaller and folds away when tapped", async () => {
+  if (!touchScreen) return { skipped: "needs a touch screen (run.py --mobile)" };
+  let app = await openApp("size=101&colors=7", PHONE);
+  app.ev("localStorage.removeItem(MAP_KEY)");
+  app = await openApp("size=101&colors=7", PHONE);
+  const width = app.ev("minimap.getBoundingClientRect().width");
+  assert(width <= 120 && width <= PHONE.width / 4 + 1, `the minimap is ${Math.round(width)}px wide`);
+  app.ev("minimap.click()");
+  assert(app.ev("minimap.hidden && !mapShow.hidden"), "tapping the minimap didn't fold it");
+  app = await openApp("size=101&colors=7", PHONE);
+  assert(app.ev("minimap.hidden && !mapShow.hidden"), "the folded minimap wasn't remembered");
+  app.ev("mapShow.click()");
+  assert(app.ev("!minimap.hidden && mapShow.hidden"), "the Map button didn't bring it back");
+  app.ev("localStorage.removeItem(MAP_KEY)");
+});
+
+test("the app can be installed to the home screen", async () => {
+  const app = await openApp("", { waitForMaze: false });
+  const links = app.ev(`[document.querySelector("link[rel=manifest]")?.href, document.querySelector("link[rel=apple-touch-icon]")?.href]`);
+  assert(links[0] && links[1], `missing links: ${links}`);
+  const manifest = await (await fetch(links[0])).json();
+  assert(manifest.name === "Rainbow Maze" && manifest.start_url && manifest.display === "fullscreen", JSON.stringify(manifest));
+  const load = (src) => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`couldn't load ${src}`));
+    img.src = src;
+  });
+  for (const { src, sizes } of manifest.icons) {
+    const img = await load(new URL(src, links[0]).href);
+    assert(`${img.naturalWidth}x${img.naturalHeight}` === sizes, `${src} is ${img.naturalWidth}x${img.naturalHeight}, says ${sizes}`);
+  }
+  const apple = await load(links[1]);
+  assert(apple.naturalWidth === 180, `the iPhone icon is ${apple.naturalWidth}px`);
+});
+
+test("vibration: bumps, color changes and winning buzz, and it can be switched off", async () => {
+  if (!touchScreen) return { skipped: "needs a touch screen (run.py --mobile)" };
+  const app = await openApp("size=41&colors=4", PHONE);
+  app.ev("localStorage.removeItem(VIBRATE_KEY); vibrateOn = true");
+  // Record vibrations instead of needing a phone.
+  app.ev(`T.buzzes = [];
+    Object.defineProperty(navigator, "vibrate", { configurable: true, value: (p) => (T.buzzes.push(JSON.stringify(p)), true) });
+    updateVibrateSwitch();`);
+  assert(app.ev(`!document.getElementById("vibrate-switch").hidden && vibrateToggle.checked`), "the switch should show, switched on");
+  app.ev(`T.press(T.blockedKey())`);
+  await sleep(50);
+  assert(app.ev("T.buzzes").includes("25"), `a bump buzzed ${app.ev("T.buzzes")}`);
+  app.ev(`vibrateToggle.click(); T.buzzes = []; T.press(T.blockedKey())`);
+  await sleep(50);
+  assert(app.ev("T.buzzes.length") === 0, "it buzzed while switched off");
+  app.ev(`vibrateToggle.click(); T.buzzes = []; T.runToEnd()`);
+  await sleep(500);
+  const buzzes = app.ev("T.buzzes");
+  assert(buzzes.includes("[15,40,15]") && buzzes.includes("[40,60,40,60,80]"), `buzzes: ${buzzes.join(" ")}`);
+  app.ev("localStorage.removeItem(VIBRATE_KEY)");
 });
 
 test("a blocked move says why", async () => {
