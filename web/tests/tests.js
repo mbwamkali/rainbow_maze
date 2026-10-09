@@ -284,6 +284,53 @@ test("zoom buttons zoom, and the minimap shows only when zoomed in", async () =>
   assert(app.ev("!minimap.hidden"), "the minimap should show when zoomed in");
 });
 
+test("the minimap folds away with a click or N, and comes back", async () => {
+  let app = await openApp("size=101&colors=7");
+  app.ev("localStorage.removeItem(MAP_KEY); zoomIn(); zoomIn()");
+  assert(app.ev("!minimap.hidden && mapShow.hidden"), "the minimap should show when zoomed in");
+  app.ev("minimap.click()");
+  assert(app.ev("minimap.hidden && !mapShow.hidden"), "clicking the minimap didn't fold it");
+  app.ev("mapShow.click()");
+  assert(app.ev("!minimap.hidden && mapShow.hidden"), "the Map button didn't bring it back");
+  app.ev(`T.press("n")`);
+  assert(app.ev("minimap.hidden && !mapShow.hidden"), "N didn't fold the minimap");
+  app.ev(`T.press("n")`);
+  assert(app.ev("!minimap.hidden && mapShow.hidden"), "N didn't bring the minimap back");
+  app.ev("localStorage.removeItem(MAP_KEY)");
+});
+
+test("the minimap moves out of the smiley's way, and stays put otherwise", async () => {
+  const app = await openApp("size=101&colors=7");
+  app.ev("localStorage.removeItem(MAP_KEY); zoomIn(); zoomIn()");
+  // Put the smiley in the middle of the maze, then scroll so it sits under the
+  // map's top-right corner.
+  app.ev(`T.overlap = () => {
+    const a = minimap.getBoundingClientRect();
+    const box = canvas.getBoundingClientRect();
+    const [x, y] = geo.center(...player).map((v, i) => box[i ? "top" : "left"] + (v - (i ? view.y : view.x)) / geo.dpr);
+    const r = geo.path / geo.dpr / 2;
+    return x + r > a.left && x - r < a.right && y + r > a.top && y - r < a.bottom;
+  };
+  T.showAt = (fx, fy) => {
+    const [x, y] = geo.center(...player);
+    view.x = x - view.w * fx;
+    view.y = y - view.h * fy;
+    clampView();
+    paint();
+  };
+  const mid = 2 * Math.floor(visibleSize(current.grid) / 4) + 1;
+  player = [mid, mid];`);
+  assert(app.ev("(stage.dataset.mapCorner || 'top-right') === 'top-right'"), "the map didn't start top right");
+  app.ev("T.showAt(0.92, 0.08)");
+  const corner = app.ev("stage.dataset.mapCorner");
+  assert(corner && corner !== "top-right", `the map stayed at ${corner}`);
+  assert(!app.ev("T.overlap()"), "the map still covers the smiley");
+  app.ev("T.showAt(0.5, 0.5)");
+  assert(app.ev("stage.dataset.mapCorner") === corner, "the map moved again with the smiley far away");
+  assert(app.ev("getComputedStyle(minimap).left") !== app.ev("getComputedStyle(minimap).right") || corner.startsWith("bottom"),
+    "the corner didn't change the map's place");
+});
+
 test("touch: a swipe runs, a pinch zooms, and ending a pinch doesn't move", async () => {
   const app = await openApp("size=101&colors=7");
   // Synthetic touch pointers on the maze canvas.
@@ -308,6 +355,22 @@ test("touch: a swipe runs, a pinch zooms, and ending a pinch doesn't move", asyn
   app.ev(`T.touch("pointerup", 2, 350, 200); T.touch("pointerup", 1, 120, 200)`);
   assert(app.ev("moves") === afterSwipe, "lifting the fingers after a pinch moved the player");
   assert(app.ev("touches.size === 0 && pinch === null"), "the pinch didn't end");
+
+  // Two fingers moving together drag the view without zooming. Start from the
+  // middle of the maze so the view has room to move.
+  app.ev("zoomIn(); centerOn(geo.pos(visibleSize(current.grid)) / 2, geo.pos(visibleSize(current.grid)) / 2); paint()");
+  const [path, x, y] = app.ev("[geo.path, view.x, view.y]");
+  app.ev(`T.touch("pointerdown", 1, 200, 200); T.touch("pointerdown", 2, 300, 200);
+    T.touch("pointermove", 1, 260, 170); T.touch("pointermove", 2, 360, 170)`);
+  await until(() => app.ev("view.x") !== x, 1000, "the two-finger drag");
+  await until(() => app.ev("pinchFrame === 0"), 1000, "the drag's frame");
+  const [path2, x2, y2] = app.ev("[geo.path, view.x, view.y]");
+  const dpr = app.ev("geo.dpr");
+  assert(path2 === path, `dragging zoomed ${path} -> ${path2}`);
+  assert(Math.abs(x - x2 - 60 * dpr) <= 2 && Math.abs(y - y2 + 30 * dpr) <= 2,
+    `dragging 60px right and 30px up moved the view by ${x2 - x}, ${y2 - y}`);
+  app.ev(`T.touch("pointerup", 1, 260, 170); T.touch("pointerup", 2, 360, 170)`);
+  assert(app.ev("moves") === afterSwipe, "the drag moved the player");
 });
 
 test("sound: muted by default, and each event has its sound", async () => {
@@ -386,7 +449,6 @@ test("the phone menu appears only on phone-sized touch screens", async () => {
       assert(shown(app, selector) === !phone, `${selector} shown=${shown(app, selector)} at ${size.width || 1000}px`);
     }
     assert(app.ev("getComputedStyle(stage).paddingLeft") === (phone ? "0px" : "8px"), "the maze card changed");
-    assert(app.ev(`getComputedStyle(minimap).pointerEvents`) === (phone ? "auto" : "none"), "the minimap's tap changed");
     // The arrow pad shows on touch screens, except on phones until it's switched on.
     assert(shown(app, "#dpad") === (touchScreen && !phone), `arrow pad shown=${shown(app, "#dpad")}`);
   }

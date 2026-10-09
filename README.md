@@ -28,6 +28,8 @@ There are two parts:
 | Move one square | Arrow keys or WASD | Arrow pad below the maze (on phones, switch it on in the menu) |
 | Run to the next turn-off | Shift + arrow | Swipe |
 | Zoom | `+` `−` `0` (fit), mouse wheel | Pinch, or the − / + / Fit buttons |
+| Look around while zoomed in | | Drag with two fingers |
+| Hide / show the map | N, or click the map | Tap the map; 🗺 Map brings it back |
 | Undo | Z, U, Backspace or Ctrl+Z | Undo button (in the menu on phones) |
 | Restart | R twice | Restart button twice (in the menu on phones) |
 | Hint / show the route | H / Shift + H | Hint and Show route buttons (Show route is in the menu on phones) |

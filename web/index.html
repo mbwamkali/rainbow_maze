@@ -147,8 +147,11 @@
       position: absolute; top: 16px; right: 16px;
       border: 2px solid #fff; border-radius: 4px;
       box-shadow: 0 1px 6px rgb(0 0 0 / 0.5);
-      pointer-events: none;
+      cursor: pointer; /* click it to fold it away to a Map button */
     }
+    /* The map moves to another corner when the smiley comes near it (see placeMap). */
+    #stage[data-map-corner$=left] :is(#minimap, #map-show) { right: auto; left: 16px; }
+    #stage[data-map-corner^=bottom] :is(#minimap, #map-show) { top: auto; bottom: 16px; }
     #building {
       position: absolute; inset: 0; border-radius: 12px;
       display: grid; place-items: center;
@@ -255,9 +258,6 @@
       #message { min-height: 1.3em; margin: 2px 8px 4px; font-size: 0.85rem; }
       #stage { padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; margin: 0 auto; }
       #building { border-radius: 0; }
-      /* A smaller minimap; tap it to fold it away to a Map button. */
-      #minimap { pointer-events: auto; cursor: pointer; }
-
       /* Full screen: only the maze, and a button under it to leave. */
       body.maze-fullscreen main:has(> #maze) { padding: 0; max-width: none; } /* beats the compact header's padding */
       body.maze-fullscreen #maze > :not(.play-area):not(#exit-fullscreen),
@@ -379,9 +379,9 @@
       </div>
       <div id="info"></div>
       <p class="hint">
-        <span class="keys-only">Move with <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · hold <kbd>Shift</kbd> to run to the next turn-off · <kbd>Z</kbd> undo · <kbd>R</kbd> restart · <kbd>H</kbd> hint · <kbd>Shift</kbd>+<kbd>H</kbd> route · <kbd>M</kbd> sound · <kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd> or the mouse wheel to zoom · <kbd>Esc</kbd> for menu</span>
-        <span class="touch-only">Swipe to run to the next turn-off, use the arrows below to step, and pinch to zoom</span>
-        <span class="mobile-only">Swipe to run to the next turn-off and pinch to zoom. The menu has undo, restart, the route and an arrow pad.</span>
+        <span class="keys-only">Move with <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · hold <kbd>Shift</kbd> to run to the next turn-off · <kbd>Z</kbd> undo · <kbd>R</kbd> restart · <kbd>H</kbd> hint · <kbd>Shift</kbd>+<kbd>H</kbd> route · <kbd>M</kbd> sound · <kbd>N</kbd> map · <kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd> or the mouse wheel to zoom · <kbd>Esc</kbd> for menu</span>
+        <span class="touch-only">Swipe to run, tap the arrows to step, pinch to zoom, and drag two fingers to look around</span>
+        <span class="mobile-only">Swipe to run to the next turn-off, pinch to zoom, and drag with two fingers to look around. The menu has undo, restart, the route and an arrow pad.</span>
       </p>
       <div id="status"></div>
       <p id="message" role="status" aria-live="polite"></p>
@@ -390,8 +390,8 @@
       <div class="play-area">
         <div id="stage">
           <canvas id="canvas"></canvas>
-          <canvas id="minimap" hidden aria-hidden="true"></canvas>
-          <button id="map-show" type="button" hidden aria-label="Show the map">🗺 Map</button>
+          <canvas id="minimap" hidden aria-hidden="true" title="Hide the map (N)"></canvas>
+          <button id="map-show" type="button" hidden aria-label="Show the map" title="Show the map (N)">🗺 Map</button>
           <div id="building" hidden role="status"><span>Building maze…</span></div>
         </div>
         <div id="dpad" aria-label="Move">
@@ -419,7 +419,7 @@
           <button id="m-zoom-fit" type="button">Fit</button>
         </div>
         <div id="m-info" class="menu-wide"></div>
-        <p class="menu-wide menu-tip">Swipe to run to the next turn-off and pinch to zoom.</p>
+        <p class="menu-wide menu-tip">Swipe to run to the next turn-off, pinch to zoom, and drag with two fingers to look around.</p>
       </div>
       <button id="exit-fullscreen" type="button">✕ Exit full screen</button>
     </section>
