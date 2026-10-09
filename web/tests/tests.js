@@ -284,6 +284,84 @@ test("zoom buttons zoom, and the minimap shows only when zoomed in", async () =>
   assert(app.ev("!minimap.hidden"), "the minimap should show when zoomed in");
 });
 
+test("a swipe stops at the first bend unless the switch says go around corners", async () => {
+  const app = await openApp("size=61&colors=5");
+  app.ev("localStorage.removeItem(CORNERS_KEY)");
+  // Find a step that lands on a bend: one way on from there, and it turns.
+  const found = app.ev(`(() => {
+    const n = visibleSize(current.grid);
+    for (let r = 1; r < n; r += 2) for (let c = 1; c < n; c += 2) {
+      for (const color of ["WHITE", ...current.palette]) for (const d of DIRECTION_LIST) {
+        const m = tryMove([r, c], color, d);
+        if (m.blocked !== undefined || m.nextColor !== color || current.grid[m.next[0]][m.next[1]].marker) continue;
+        const ways = DIRECTION_LIST.filter(([dr, dc]) => !(dr === -d[0] && dc === -d[1]))
+          .filter((w) => tryMove(m.next, color, w).blocked === undefined);
+        if (ways.length === 1 && (ways[0][0] !== d[0] || ways[0][1] !== d[1])) {
+          T.bend = { at: [r, c], color, d, stop: m.next };
+          return true;
+        }
+      }
+    }
+    return false;
+  })()`);
+  assert(found, "no bend found in the maze");
+  app.ev(`T.touch = (type, x, y) => {
+    const box = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new PointerEvent(type, { pointerId: 1, pointerType: "touch", isPrimary: true,
+      clientX: box.left + x, clientY: box.top + y, bubbles: true }));
+  };
+  T.swipeBend = () => {
+    newRound();
+    [player, playerColor] = [T.bend.at, T.bend.color];
+    const [dr, dc] = T.bend.d;
+    T.touch("pointerdown", 150, 150);
+    T.touch("pointerup", 150 + dc * 80, 150 + dr * 80);
+    finishAnimation();
+    return player[0] === T.bend.stop[0] && player[1] === T.bend.stop[1];
+  };`);
+  assert(app.ev("swipeCorners === false"), "swipes should stop at corners by default");
+  assert(app.ev("T.swipeBend()"), "the swipe didn't stop at the bend");
+  app.ev(`const t = document.querySelector(".corner-toggle"); t.checked = true; t.dispatchEvent(new Event("change"))`);
+  assert(app.ev("swipeCorners && [...cornerToggles].every((t) => t.checked)"), "the switch didn't turn on (or the other copy didn't follow)");
+  assert(!app.ev("T.swipeBend()"), "with the switch on, the swipe still stopped at the bend");
+  // Shift + arrow runs follow bends either way.
+  app.ev(`setSwipeCorners(false); newRound(); [player, playerColor] = [T.bend.at, T.bend.color]`);
+  app.ev(`T.press(T.KEY[T.bend.d.join()], { shiftKey: true })`);
+  assert(app.ev("player[0] !== T.bend.stop[0] || player[1] !== T.bend.stop[1]"), "a Shift run stopped at the bend");
+  app.ev("localStorage.removeItem(CORNERS_KEY)");
+});
+
+test("slides go about 75ms a square and start gently", async () => {
+  const app = await openApp("size=61&colors=5");
+  app.ev(`T.press(T.solutionKey(), {}, false)`);
+  const one = app.ev("[anim.duration, anim.steps]");
+  app.ev("finishAnimation()");
+  assert(one[1] === 1 && one[0] === 110, `one square took ${one[0]}ms`);
+  app.ev("newRound(); T.from = 0");
+  app.ev(`T.press(T.solutionKey(), { shiftKey: true }, false)`);
+  const [duration, steps] = app.ev("[anim.duration, anim.steps]");
+  app.ev("finishAnimation()");
+  assert(duration === Math.min(110 + (steps - 1) * 75, 1500), `a ${steps}-square run took ${duration}ms`);
+});
+
+test("phone: the view glides toward the smiley instead of jumping", async () => {
+  if (!touchScreen) return { skipped: "needs a touch screen (run.py --mobile)" };
+  const app = await openApp("size=101&colors=7", PHONE);
+  app.ev("zoomIn(); zoomIn()");
+  // Scroll far away, then ask the view to follow the smiley.
+  app.ev("view.x = view.y = 0; clampView(); const mid = 2 * Math.floor(visibleSize(current.grid) / 4) + 1; player = [mid, mid]; paint()");
+  const before = app.ev("[view.x, view.y]");
+  app.ev("follow(...geo.center(...player)); paint(); startGlide()");
+  const first = app.ev("[view.x, view.y, camTarget && camTarget.x, camTarget && camTarget.y]");
+  assert(first[2] !== null, "the view jumped instead of gliding");
+  assert(first[0] > before[0] && first[0] < first[2], `the first step went ${before[0]} -> ${first[0]} of ${first[2]}`);
+  await until(() => app.ev("camTarget === null"), 3000, "the glide to finish");
+  const [x, y] = app.ev("[geo.center(...player)[0] - view.x, geo.center(...player)[1] - view.y]");
+  const [w, h] = app.ev("[view.w, view.h]");
+  assert(x >= w * 0.35 - 1 && x <= w * 0.65 + 1 && y >= h * 0.35 - 1 && y <= h * 0.65 + 1,
+    `the smiley ended at ${Math.round(x)}, ${Math.round(y)} in a ${w}×${h} view`);
+});
+
 test("the minimap folds away with a click or N, and comes back", async () => {
   let app = await openApp("size=101&colors=7");
   app.ev("localStorage.removeItem(MAP_KEY); zoomIn(); zoomIn()");
@@ -449,6 +527,9 @@ test("the phone menu appears only on phone-sized touch screens", async () => {
       assert(shown(app, selector) === !phone, `${selector} shown=${shown(app, selector)} at ${size.width || 1000}px`);
     }
     assert(app.ev("getComputedStyle(stage).paddingLeft") === (phone ? "0px" : "8px"), "the maze card changed");
+    // The corner switch is in the toolbar on bigger touch screens (in the menu on phones).
+    const cornerSwitch = app.ev(`document.querySelector(".view-controls .corner-switch").getClientRects().length > 0`);
+    assert(cornerSwitch === (touchScreen && !phone), `toolbar corner switch shown=${cornerSwitch}`);
     // The arrow pad shows on touch screens, except on phones until it's switched on.
     assert(shown(app, "#dpad") === (touchScreen && !phone), `arrow pad shown=${shown(app, "#dpad")}`);
   }

@@ -425,30 +425,79 @@ function layoutView(path) {
   canvas.style.height = `${view.h / dpr}px`;
 }
 
-function clampView() {
+// A view offset {x, y} kept inside the maze, in whole device pixels.
+function clampSpot({ x, y }) {
   const mazePx = geo.pos(visibleSize(current.grid));
-  view.x = Math.round(Math.min(Math.max(view.x, 0), mazePx - view.w));
-  view.y = Math.round(Math.min(Math.max(view.y, 0), mazePx - view.h));
+  return {
+    x: Math.round(Math.min(Math.max(x, 0), mazePx - view.w)),
+    y: Math.round(Math.min(Math.max(y, 0), mazePx - view.h)),
+  };
+}
+function clampView() {
+  Object.assign(view, clampSpot(view));
 }
 
 function centerOn(x, y) {
+  camTarget = null; // a jump, not a glide
   view.x = x - view.w / 2;
   view.y = y - view.h / 2;
   clampView();
 }
 
+// On phones the view glides toward the smiley and keeps it nearer the middle;
+// elsewhere it moves in step with the smiley.
+let camTarget = null; // where a gliding view is heading, or null when it's still
+let camTime = 0;
+const glideCamera = () => mobileView.matches && !reducedMotion.matches;
+
 // Keep the point (x, y) away from the canvas edges: the view only moves once the
-// smiley gets within 30% of an edge. Returns whether the view moved.
-function follow(x, y) {
+// smiley gets within 30% of an edge (35% on phones). Returns whether the view moved.
+function follow(x, y, now = performance.now()) {
+  const glide = glideCamera();
+  const aim = glide ? { ...(camTarget || view) } : view;
   const { x: oldX, y: oldY } = view;
-  const mx = view.w * 0.3;
-  const my = view.h * 0.3;
-  if (x - view.x < mx) view.x = x - mx;
-  if (x - view.x > view.w - mx) view.x = x - (view.w - mx);
-  if (y - view.y < my) view.y = y - my;
-  if (y - view.y > view.h - my) view.y = y - (view.h - my);
-  clampView();
+  const share = glide ? 0.35 : 0.3;
+  const mx = view.w * share;
+  const my = view.h * share;
+  if (x - aim.x < mx) aim.x = x - mx;
+  if (x - aim.x > view.w - mx) aim.x = x - (view.w - mx);
+  if (y - aim.y < my) aim.y = y - my;
+  if (y - aim.y > view.h - my) aim.y = y - (view.h - my);
+  if (!glide) {
+    clampView();
+    return view.x !== oldX || view.y !== oldY;
+  }
+  camTarget = clampSpot(aim);
+  return glideStep(now);
+}
+
+// Move a gliding view part of the way to its target: about 60% of the way in
+// 150ms, and at least a pixel, so it eases in without stalling.
+function glideStep(now) {
+  if (!camTarget) return false;
+  const dt = Math.min(64, Math.max(0, now - camTime) || 16);
+  camTime = now;
+  const k = 1 - Math.exp(-dt / 160);
+  const { x: oldX, y: oldY } = view;
+  for (const axis of ["x", "y"]) {
+    const gap = camTarget[axis] - view[axis];
+    const step = Math.round(gap * k);
+    view[axis] += Math.abs(step) >= 1 ? step : Math.sign(gap);
+  }
+  if (view.x === camTarget.x && view.y === camTarget.y) camTarget = null;
   return view.x !== oldX || view.y !== oldY;
+}
+
+// Keep a gliding view moving after the smiley stops (the slide draws its own frames).
+function glideFrame(now) {
+  if (!camTarget || anim || !current) return;
+  if (glideStep(now)) paint();
+  if (camTarget) requestAnimationFrame(glideFrame);
+}
+function startGlide() {
+  if (!camTarget) return;
+  camTime = performance.now();
+  requestAnimationFrame(glideFrame);
 }
 
 // The row/column under device-pixel offset `px` (inverse of geo.pos).
@@ -688,10 +737,11 @@ function tryMove(at, color, [dr, dc]) {
   return { mid, next, midColor, nextColor };
 }
 
-// Move one square, or with `run`, keep going along the corridor (round bends)
-// until a junction, a dead end, a color change, or the end. A blocked first
-// move bumps the smiley and says why.
-function move(dir, run = false) {
+// Move one square, or with `run`, keep going along the corridor until a junction,
+// a dead end, a color change, or the end. With `corners` the run follows bends;
+// without, it also stops at the first bend. A blocked first move bumps the
+// smiley and says why.
+function move(dir, run = false, corners = true) {
   if (solved || building || !current) return;
   finishAnimation();
   const first = tryMove(player, playerColor, dir);
@@ -718,6 +768,7 @@ function move(dir, run = false) {
       .map((d) => ({ d, m: tryMove(at, color, d) }))
       .filter(({ m: way }) => way.blocked === undefined);
     if (ways.length !== 1) break;
+    if (!corners && (ways[0].d[0] !== heading[0] || ways[0].d[1] !== heading[1])) break;
     [heading, m] = [ways[0].d, ways[0].m];
   }
   history.push({ player, color: playerColor, moves, trailLength: trail.length });
@@ -768,6 +819,7 @@ function undo() {
   if (overlayKind === "route") showRoute(player, playerColor, false);
   follow(...geo.center(...player));
   paint();
+  startGlide();
   updateStatus();
 }
 
@@ -872,7 +924,8 @@ function setRouteButton(on) {
 function animate({ cells, points, fills, toward, bump = false, steps = 1 }) {
   anim = {
     start: performance.now(),
-    duration: reducedMotion.matches ? 0 : bump ? 160 : Math.min(90 + (steps - 1) * 45, 900),
+    duration: reducedMotion.matches ? 0 : bump ? 160 : Math.min(110 + (steps - 1) * 75, 1500),
+    steps,
     cells,
     pointSquares: points,
     points: points.map((p) => geo.center(...p)),
@@ -888,7 +941,8 @@ function frame(now) {
   // A frame's timestamp is when the browser started the frame, which can be a
   // moment before the key press that started this animation, so clamp at 0.
   const t = anim.duration ? Math.min(1, Math.max(0, (now - anim.start) / anim.duration)) : 1;
-  const ease = 1 - (1 - t) ** 3;
+  // One square eases out quickly; a run starts and ends gently.
+  const ease = anim.steps > 1 ? 0.5 - Math.cos(Math.PI * t) / 2 : 1 - (1 - t) ** 3;
   const last = anim.points.length - 1;
   const u = ease * last;
   const i = Math.min(Math.floor(u), Math.max(0, last - 1));
@@ -904,7 +958,7 @@ function frame(now) {
     y += anim.toward[0] * push;
   }
   const ctx = canvas.getContext("2d");
-  if (follow(x, y)) {
+  if (follow(x, y, now)) {
     paintSquares();
     updateMinimap();
   } else {
@@ -924,6 +978,7 @@ function frame(now) {
   }
   anim = null;
   updateMinimap();
+  startGlide();
   if (solved && !winMenu.open) showWin();
 }
 
@@ -1183,6 +1238,27 @@ function foldMinimap(folded) {
 minimap.addEventListener("click", () => foldMinimap(true));
 mapShow.addEventListener("click", () => foldMinimap(false));
 
+// Swipes stop at the first bend unless this is on; then they follow bends like
+// Shift + arrow runs do. Off by default; the switch is in the phone menu (and
+// the toolbar on bigger touch screens), and the choice is remembered.
+const CORNERS_KEY = "rainbow-maze-swipe-corners";
+const cornerToggles = document.querySelectorAll(".corner-toggle");
+let swipeCorners = false;
+try {
+  swipeCorners = localStorage.getItem(CORNERS_KEY) === "on";
+} catch {}
+function setSwipeCorners(on) {
+  swipeCorners = on;
+  for (const toggle of cornerToggles) toggle.checked = on;
+  try {
+    localStorage.setItem(CORNERS_KEY, on ? "on" : "off");
+  } catch {}
+}
+for (const toggle of cornerToggles) {
+  toggle.checked = swipeCorners;
+  toggle.addEventListener("change", () => setSwipeCorners(toggle.checked));
+}
+
 // Vibration on touch devices that support it (Android, not iPhones): a short buzz
 // for a bump, a double one for a color change, and a longer pattern for winning.
 // On by default; the switch is in the phone menu, and the choice is remembered.
@@ -1306,6 +1382,7 @@ canvas.addEventListener("pointermove", (e) => {
     finishAnimation();
     const path = Math.round((pinch.path * fingerGap()) / pinch.distance);
     if (path !== geo.path) layoutView(path);
+    camTarget = null; // the fingers move the view now
     const mazePx = geo.pos(visibleSize(current.grid));
     const [mx, my] = fingerMid();
     view.x = pinch.anchor[0] * mazePx - mx;
@@ -1325,7 +1402,7 @@ function liftFinger(e) {
   const dy = e.clientY - swipeStart[1];
   swipeStart = null;
   if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return; // a tap, not a swipe
-  move(Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0], true);
+  move(Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0], true, swipeCorners);
 }
 canvas.addEventListener("pointerup", liftFinger);
 canvas.addEventListener("pointercancel", liftFinger);
