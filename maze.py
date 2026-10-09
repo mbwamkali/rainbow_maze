@@ -19,6 +19,7 @@ Same rules as the web app (web/maze.js):
   square twice.
 """
 
+import itertools
 import json
 import math
 import random
@@ -28,7 +29,7 @@ from collections import deque
 from PIL import Image, ImageDraw
 
 SIZE = 100
-CELL = 48  # pixels per cell in the rendered image
+CELL = 56  # pixels per passage in the rendered image; walls are a quarter of that
 
 WALL = "WALL"
 # Flashes (in the web app) between the colors of the squares it touches.
@@ -104,6 +105,20 @@ def ask_color_count():
         print(f"Please enter a whole number from 1 to {MAX_COLORS}.")
 
 
+def ask_layout():
+    """Menu: keep asking until the user picks a layout."""
+    print("How should the colors be laid out?")
+    print("  1   bands     wavy stripes from the upper left to the bottom right")
+    print("  2   blobs     patches like countries on a map")
+    print("  3   tendrils  colors wind through each other along the solution")
+    styles = list(REGION_STYLES)
+    while True:
+        answer = input(f"Enter a number (1-{len(styles)}): ").strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(styles):
+            return styles[int(answer) - 1]
+        print(f"Please enter a whole number from 1 to {len(styles)}.")
+
+
 def color_of(value):
     return value["color"] if isinstance(value, dict) else value
 
@@ -132,12 +147,12 @@ def can_enter(player, square):
 
 
 def corners(size=SIZE):
-    """Start is the upper-right open cell, end is the bottom-left open cell.
+    """Start is the upper-left open cell, end is the bottom-right open cell.
 
     Passages sit on odd coordinates, so the outermost usable index is the largest odd one.
     """
     last = size - 2 if size % 2 else size - 3
-    return (1, last), (last, 1)
+    return (1, 1), (last, last)
 
 
 def region_order(colors, rng):
@@ -158,10 +173,10 @@ def region_order(colors, rng):
     return [first] + [c for c in rest if c in PRIMARY] + [c for c in rest if c in SECONDARY]
 
 
-def band_lattice(m, count, rng):
+def band_lattice(m, count, rng, start, end, min_touch):
     """Split the passage lattice into `count` equal-size wavy diagonal bands.
 
-    Bands run from the upper right to the bottom left.
+    Bands run from the upper left to the bottom right.
     TODO(expert mode): allow several separate regions per color.
     """
     waves = [(0.35 / count * rng.random(), 1 + rng.random() * 2, rng.random() * 2 * math.pi) for _ in range(2)]
@@ -169,8 +184,8 @@ def band_lattice(m, count, rng):
     nodes = []
     for i in range(m):
         for j in range(m):
-            along = (i + (m - 1 - j)) / span  # 0 at upper right, 1 at bottom left
-            across = (i - (m - 1 - j)) / span
+            along = (i + j) / span  # 0 at upper left, 1 at bottom right
+            across = (i - j) / span
             t = along + sum(amp * math.sin(2 * math.pi * freq * across + phase) for amp, freq, phase in waves)
             nodes.append((t, i, j))
     nodes.sort()
@@ -180,16 +195,149 @@ def band_lattice(m, count, rng):
     return band
 
 
-def layout(size, order, rng):
+def _lattice_neighbors(m, i, j):
+    return [(i + di, j + dj) for di, dj in STEPS if 0 <= i + di < m and 0 <= j + dj < m]
+
+
+def _touching(m, region):
+    """How many lattice-neighbor pairs join each pair of regions: {(a, b): count} with a < b."""
+    touch = {}
+    for i in range(m):
+        for j in range(m):
+            for ni, nj in ((i + 1, j), (i, j + 1)):
+                if ni < m and nj < m and region[i][j] != region[ni][nj]:
+                    key = tuple(sorted((region[i][j], region[ni][nj])))
+                    touch[key] = touch.get(key, 0) + 1
+    return touch
+
+
+def blob_lattice(m, count, rng, start, end, min_touch):
+    """Regions grown outward from scattered seed points, like countries on a map.
+
+    The start's blob comes first and the end's blob last; the blobs in between
+    are put in any order where each blob touches the next in at least
+    `min_touch` places. Returns None if no such order exists.
+    """
+    if count == 1:
+        return [[0] * m for _ in range(m)]
+    nodes = [(i, j) for i in range(m) for j in range(m)]
+    # Spread the seeds out: each new seed is the farthest of a few random candidates.
+    seeds = [start]
+    while len(seeds) < count:
+        candidates = rng.sample(nodes, min(len(nodes), 12))
+        seeds.append(max(candidates, key=lambda n: min(abs(n[0] - s[0]) + abs(n[1] - s[1]) for s in seeds)))
+    if len(set(seeds)) < count:
+        return None
+    region = [[-1] * m for _ in range(m)]
+    frontier = [[] for _ in range(count)]
+    sizes = [0] * count
+    for k, (i, j) in enumerate(seeds):
+        region[i][j] = k
+        sizes[k] = 1
+        frontier[k] = _lattice_neighbors(m, i, j)
+    # Always grow the smallest blob that still can, so sizes stay even.
+    while True:
+        growing = [k for k in range(count) if frontier[k]]
+        if not growing:
+            break
+        k = min(growing, key=lambda g: (sizes[g], rng.random()))
+        pick = rng.randrange(len(frontier[k]))
+        frontier[k][pick], frontier[k][-1] = frontier[k][-1], frontier[k][pick]
+        i, j = frontier[k].pop()
+        if region[i][j] != -1:
+            continue
+        region[i][j] = k
+        sizes[k] += 1
+        frontier[k] += [n for n in _lattice_neighbors(m, i, j) if region[n[0]][n[1]] == -1]
+
+    first, last = region[start[0]][start[1]], region[end[0]][end[1]]
+    if first == last:
+        return None
+    touch = _touching(m, region)
+    middle = [k for k in range(count) if k not in (first, last)]
+    orders = list(itertools.permutations(middle))
+    rng.shuffle(orders)
+    for mid in orders:
+        chain = [first, *mid, last]
+        if all(touch.get(tuple(sorted(pair)), 0) >= min_touch for pair in zip(chain, chain[1:])):
+            position = {k: n for n, k in enumerate(chain)}
+            return [[position[region[i][j]] for j in range(m)] for i in range(m)]
+    return None
+
+
+def tendril_lattice(m, count, rng, start, end, min_touch):
+    """Regions that follow the solution of one big maze, so colors interlock like fingers.
+
+    Carve a maze over the whole lattice, cut its start-to-end path into `count`
+    stretches of about equal weight, and give every dead-end branch the region
+    of the path square it hangs off.
+    """
+    # One big maze (randomized depth-first search), remembering each square's parent.
+    parent = {start: None}
+    stack = [start]
+    while stack:
+        cur = stack[-1]
+        nxt = [n for n in _lattice_neighbors(m, *cur) if n not in parent]
+        if not nxt:
+            stack.pop()
+            continue
+        n = rng.choice(nxt)
+        parent[n] = cur
+        stack.append(n)
+    path = [end]
+    while parent[path[-1]] is not None:
+        path.append(parent[path[-1]])
+    path.reverse()
+    on_path = {n: k for k, n in enumerate(path)}
+
+    # Which path square each branch hangs off, and how much hangs off each.
+    children = {}
+    for n, p in parent.items():
+        if p is not None:
+            children.setdefault(p, []).append(n)
+    attach = {}
+    weight = [0] * len(path)
+    for k, p in enumerate(path):
+        todo = [p]
+        while todo:
+            n = todo.pop()
+            attach[n] = k
+            weight[k] += 1
+            todo += [c for c in children.get(n, []) if c not in on_path]
+
+    # Cut the path where the running total passes each 1/count share.
+    total, running, cuts = m * m, 0, []
+    for k, w in enumerate(weight):
+        running += w
+        if len(cuts) < count - 1 and running >= total * (len(cuts) + 1) / count and k < len(path) - 1:
+            cuts.append(k)
+    if len(cuts) < count - 1:
+        return None
+    segment = [sum(1 for c in cuts if k > c) for k in range(len(path))]
+    region = [[segment[attach[(i, j)]] for j in range(m)] for i in range(m)]
+    sizes = [sum(row.count(k) for row in region) for k in range(count)]
+    if min(sizes) < 0.5 * total / count:
+        return None  # one branch was too big to split evenly
+    touch = _touching(m, region)
+    if any(touch.get((k, k + 1), 0) < min_touch for k in range(count - 1)):
+        return None
+    return region
+
+
+# How the board is split into color regions.
+REGION_STYLES = {"bands": band_lattice, "blobs": blob_lattice, "tendrils": tendril_lattice}
+
+
+def layout(size, order, rng, style="bands"):
     """One attempt at a full layout; returns None if this random layout doesn't work out."""
     start, end = corners(size)
-    m = (start[1] + 1) // 2  # lattice nodes per side
+    m = (end[1] + 1) // 2  # lattice nodes per side
     colors = ["WHITE"] + order
     count = len(colors)
-    band = band_lattice(m, count, rng)
     si, sj = (start[0] - 1) // 2, (start[1] - 1) // 2
     ei, ej = (end[0] - 1) // 2, (end[1] - 1) // 2
-    if band[si][sj] != 0 or band[ei][ej] != count - 1:
+    band = REGION_STYLES[style](m, count, rng, (si, sj), (ei, ej), connections_per_pair(size))
+    if band is None or band[si][sj] != 0 or band[ei][ej] != count - 1:
         return None
 
     def inside(i, j):
@@ -430,14 +578,16 @@ def add_openings(grid, start, end, colors, connections, rng):
     return True
 
 
-def build_grid(color_count=MAX_COLORS, size=SIZE, seed=None, max_attempts=200):
-    """Build a maze with START in the upper right and END in the bottom left.
+def build_grid(color_count=MAX_COLORS, size=SIZE, seed=None, max_attempts=200, style="bands"):
+    """Build a maze with START in the upper left and END in the bottom right.
 
     A layout is only accepted if every pair of neighboring regions touches in
     the required number of places, there's exactly one route under the color
     rules, and it can't be solved without taking on every color.
     Returns (grid, region color order, shortest solution).
     """
+    if style not in REGION_STYLES:
+        raise ValueError(f"layout must be one of: {', '.join(REGION_STYLES)}")
     if size < MIN_SIZE_FOR_COLORS[color_count]:
         raise ValueError(f"{color_count} colors need a maze size of at least {MIN_SIZE_FOR_COLORS[color_count]}")
     rng = random.Random(seed)
@@ -445,7 +595,7 @@ def build_grid(color_count=MAX_COLORS, size=SIZE, seed=None, max_attempts=200):
     start, end = corners(size)
     for _ in range(max_attempts):
         order = region_order(palette[1:], rng)
-        result = layout(size, order, rng)
+        result = layout(size, order, rng, style)
         if not result:
             continue
         grid = result
@@ -470,12 +620,18 @@ def touching_colors(grid, r, c):
 
 
 def render(grid, path, cell=CELL):
+    """Passages (odd rows/columns) are `cell` pixels thick, walls (even ones) a quarter of that."""
     size = len(grid)
-    img = Image.new("RGB", (size * cell, size * cell), "white")
+    wall = max(1, round(cell / 4))
+
+    def pos(k):
+        return (k + 1) // 2 * wall + k // 2 * cell
+
+    img = Image.new("RGB", (pos(size), pos(size)), "white")
     draw = ImageDraw.Draw(img)
     for r, row in enumerate(grid):
         for c, value in enumerate(row):
-            box = (c * cell, r * cell, (c + 1) * cell - 1, (r + 1) * cell - 1)
+            box = (pos(c), pos(r), pos(c + 1) - 1, pos(r + 1) - 1)
             if value == WALL:
                 draw.rectangle(box, fill="black")
                 continue
@@ -486,7 +642,7 @@ def render(grid, path, cell=CELL):
                 x0, y0, x1, y1 = box
                 draw.polygon([(x0, y0), (x1, y0), (x0, y1)], fill=RGB[colors[0]])
                 draw.polygon([(x1, y0), (x1, y1), (x0, y1)], fill=RGB[colors[-1]])
-                frame = max(2, cell // 12)
+                frame = max(1, min(box[2] - box[0], box[3] - box[1]) // 8)
                 draw.rectangle(box, outline="white", width=2 * frame)
                 draw.rectangle(box, outline="black", width=frame)
                 continue
@@ -516,15 +672,16 @@ def render(grid, path, cell=CELL):
 if __name__ == "__main__":
     sys.setrecursionlimit(10_000)  # route counting recurses once per junction
     color_count = ask_color_count()
-    grid, order, path = build_grid(color_count)
+    style = ask_layout()
+    grid, order, path = build_grid(color_count, style=style)
     with open("grid.json", "w") as f:
         json.dump(grid, f)
     render(grid, "grid.png")
-    # Zoomed previews of the start (upper-right) and end (bottom-left) corners.
-    render([row[-20:] for row in grid[:20]], "preview_start.png")
-    render([row[:20] for row in grid[-20:]], "preview_end.png")
+    # Zoomed previews of the start (upper-left) and end (bottom-right) corners.
+    render([row[:20] for row in grid[:20]], "preview_start.png")
+    render([row[-20:] for row in grid[-20:]], "preview_end.png")
     start, end = corners()
-    print(f"regions, start to end: {' -> '.join(c.lower() for c in order)}")
+    print(f"{style} layout, regions start to end: {' -> '.join(c.lower() for c in order)}")
     for first, second in zip(order, order[1:]):
         touching = sum(1 for _ in boundary_squares(grid, frozenset((first, second))))
         print(f"{first.lower()}/{second.lower()} touch in {touching} places"

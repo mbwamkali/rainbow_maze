@@ -64,6 +64,14 @@
       background: var(--bg);
       color: var(--text);
     }
+    select {
+      font: inherit;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
     input[type=range] { width: 100%; accent-color: var(--accent); }
     .row { display: flex; justify-content: space-between; }
     button {
@@ -109,7 +117,7 @@
   <main>
     <section id="setup">
       <h1>Rainbow Maze</h1>
-      <p class="sub">Start at the X in the upper right and find your way to the circle in the bottom left.
+      <p class="sub">Start at the X in the upper left and find your way to the circle in the bottom right.
         You start out white, and white can only walk on white. Flashing blocks join the colors:
         anyone can step onto one, and whatever square you step onto next, you take on its color — in any direction.
         A color can walk on itself, on white, and on any color it contains: magenta (red + blue) walks on red and blue too, but not green.</p>
@@ -123,6 +131,15 @@
           <span class="row">Number of colors <span id="colors-value"></span></span>
           <input id="colors" type="range" min="1" value="7" step="1">
           <small id="colors-hint"></small>
+        </label>
+        <label>
+          Layout
+          <select id="layout">
+            <option value="bands">Bands</option>
+            <option value="blobs">Blobs</option>
+            <option value="tendrils">Tendrils</option>
+          </select>
+          <small id="layout-hint"></small>
         </label>
         <p id="error" role="alert"></p>
         <button class="primary" type="submit">Create maze</button>

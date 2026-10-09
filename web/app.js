@@ -6,6 +6,8 @@ const form = document.getElementById("setup-form");
 const sizeInput = document.getElementById("size");
 const colorsInput = document.getElementById("colors");
 const colorsHint = document.getElementById("colors-hint");
+const layoutInput = document.getElementById("layout");
+const layoutHint = document.getElementById("layout-hint");
 const error = document.getElementById("error");
 const canvas = document.getElementById("canvas");
 const info = document.getElementById("info");
@@ -23,13 +25,19 @@ const COLOR_HINTS = {
   7: "White + all primary and secondary colors",
 };
 
+const LAYOUT_HINTS = {
+  bands: "Wavy stripes from the upper left to the bottom right",
+  blobs: "Patches like countries on a map; the next color can be in any direction",
+  tendrils: "Colors wind through each other along the solution; hardest to read",
+};
+
 let current = null;
 let player = null; // [row, col]
 let playerColor = "WHITE";
 let flashTick = 0;
 let moves = 0;
 let solved = false;
-let cellSize = 0;
+let geo = null; // row/column sizes, see geometry()
 
 sizeInput.max = MAX_SIZE;
 colorsInput.max = MAX_COLORS;
@@ -43,13 +51,16 @@ function updateHint() {
   document.getElementById("size-range").textContent = `${minSize}–${MAX_SIZE}`;
 }
 colorsInput.addEventListener("input", updateHint);
+const updateLayoutHint = () => (layoutHint.textContent = LAYOUT_HINTS[layoutInput.value] || "");
+layoutInput.addEventListener("change", updateLayoutHint);
+updateLayoutHint();
 updateHint();
 
 function generate() {
   const size = Number(sizeInput.value);
   const colors = Number(colorsInput.value);
   try {
-    current = buildGrid(colors, size);
+    current = buildGrid(colors, size, layoutInput.value);
   } catch (e) {
     error.textContent = e.message;
     return false;
@@ -71,33 +82,41 @@ function generate() {
   }
   const length = document.createElement("span");
   length.className = "meta";
-  length.textContent = `${size}×${size} · shortest solution ${current.path.length} squares`;
+  length.textContent = `${size}×${size} · ${layoutInput.value} · shortest solution ${current.path.length} squares`;
   info.append(length);
   return true;
 }
 
-// Fit the maze to the available space, never smaller than 2px per square.
+// Fit the maze to the available space, with passages at least 4px wide.
 function draw() {
   if (!current) return;
   const size = current.grid.length;
   const room = Math.min(mazeScreen.clientWidth - 32, window.innerHeight - 160);
-  cellSize = Math.max(2, Math.floor(room / size));
-  render(current.grid, canvas, cellSize, flashTick);
-  drawPlayer(canvas.getContext("2d"), ...player, cellSize, playerColor);
+  let path = Math.max(4, Math.floor((room * 1.6) / size));
+  while (path > 4 && geometry(path).pos(size) > room) path--;
+  geo = geometry(path);
+  render(current.grid, canvas, geo, flashTick);
+  drawPlayer(canvas.getContext("2d"), ...player, geo, playerColor);
+}
+
+// Redraw a square and its neighbors, which the player's face can spill onto.
+function redrawAround(ctx, r, c) {
+  drawCell(ctx, current.grid, r, c, geo, flashTick);
+  for (const [dr, dc] of DIRECTIONS_LIST) drawCell(ctx, current.grid, r + dr, c + dc, geo, flashTick);
 }
 
 function updateMoves() {
   movesLabel.textContent = `Moves: ${moves} · You are ${playerColor.toLowerCase()}`;
 }
 
-// Flash the COLOR_CHANGE squares by redrawing just those (and the player if on one).
+// Flash the COLOR_CHANGE squares by redrawing just those (and the player if on or next to one).
 setInterval(() => {
   if (!current || mazeScreen.hidden) return;
   flashTick++;
   const ctx = canvas.getContext("2d");
   for (const [r, c] of current.changers) {
-    drawCell(ctx, current.grid, r, c, cellSize, flashTick);
-    if (r === player[0] && c === player[1]) drawPlayer(ctx, r, c, cellSize, playerColor);
+    drawCell(ctx, current.grid, r, c, geo, flashTick);
+    if (Math.abs(r - player[0]) + Math.abs(c - player[1]) <= 1) drawPlayer(ctx, ...player, geo, playerColor);
   }
 }, 400);
 
@@ -107,9 +126,10 @@ const DIRECTIONS = {
   ArrowLeft: [0, -1],
   ArrowRight: [0, 1],
 };
+const DIRECTIONS_LIST = Object.values(DIRECTIONS);
 
-// Step one square if the player's color allows it; only the two affected squares
-// are redrawn. Stepping off a COLOR_CHANGE square takes on the color of the next square.
+// Step one square if the player's color allows it; only the squares around the
+// old position are redrawn. Stepping off a COLOR_CHANGE square takes on the color of the next square.
 function move([dr, dc]) {
   const [r, c] = player;
   const nr = r + dr;
@@ -120,10 +140,10 @@ function move([dr, dc]) {
   const nextColor = step(playerColor, grid[r][c], target);
   if (!nextColor) return;
   const ctx = canvas.getContext("2d");
-  drawCell(ctx, grid, r, c, cellSize, flashTick);
+  redrawAround(ctx, r, c);
   player = [nr, nc];
   playerColor = nextColor;
-  drawPlayer(ctx, nr, nc, cellSize, playerColor);
+  drawPlayer(ctx, nr, nc, geo, playerColor);
   moves++;
   updateMoves();
   if (grid[nr][nc].marker === END) {
@@ -184,9 +204,11 @@ document.getElementById("download").addEventListener("click", () => {
 });
 window.addEventListener("resize", draw);
 
-// Optional ?size=…&colors=… skips the setup screen, e.g. index.html?size=40&colors=3
+// Optional ?size=…&colors=…&layout=… skips the setup screen, e.g. index.html?size=40&colors=3&layout=blobs
 const params = new URLSearchParams(location.search);
-if (params.has("size") || params.has("colors")) {
+if (params.has("layout")) layoutInput.value = params.get("layout");
+updateLayoutHint();
+if (params.has("size") || params.has("colors") || params.has("layout")) {
   if (params.has("size")) sizeInput.value = params.get("size");
   if (params.has("colors")) colorsInput.value = params.get("colors");
   updateHint();

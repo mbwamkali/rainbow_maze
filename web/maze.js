@@ -1,5 +1,5 @@
 // Maze logic: a grid of walls and colored regions with a guaranteed path from
-// START (upper right) to END (bottom left).
+// START (upper left) to END (bottom right).
 //
 // Light rules:
 // - The player starts WHITE, which counts as "no color".
@@ -111,7 +111,7 @@ function canEnter(player, square) {
 // Passages sit on odd coordinates, so the outermost usable index is the largest odd one.
 function corners(size) {
   const last = size % 2 ? size - 2 : size - 3;
-  return [[1, last], [last, 1]];
+  return [[1, 1], [last, last]];
 }
 
 // Order the non-white colors so each region needs a new color: a color that sits
@@ -130,17 +130,17 @@ function regionOrder(colors) {
 }
 
 // Split the passage lattice (odd cells) into `count` equal-size bands running
-// diagonally from the upper right to the bottom left, with wavy edges.
+// diagonally from the upper left to the bottom right, with wavy edges.
 // TODO(expert mode): allow several separate regions per color.
-function bandLattice(m, count) {
+function bandLattice(m, count, start, end, minTouch) {
   const wave = () => ({ amp: (0.35 / count) * Math.random(), freq: 1 + Math.random() * 2, phase: Math.random() * 2 * Math.PI });
   const waves = [wave(), wave()];
   const span = Math.max(1, 2 * (m - 1));
   const nodes = [];
   for (let i = 0; i < m; i++) {
     for (let j = 0; j < m; j++) {
-      const along = (i + (m - 1 - j)) / span; // 0 at upper right, 1 at bottom left
-      const across = (i - (m - 1 - j)) / span;
+      const along = (i + j) / span; // 0 at upper left, 1 at bottom right
+      const across = (i - j) / span;
       let t = along;
       for (const w of waves) t += w.amp * Math.sin(2 * Math.PI * w.freq * across + w.phase);
       nodes.push({ i, j, t });
@@ -152,20 +152,159 @@ function bandLattice(m, count) {
   return band;
 }
 
+function latticeNeighbors(m, i, j) {
+  return STEPS.map(([di, dj]) => [i + di, j + dj]).filter(([a, b]) => a >= 0 && a < m && b >= 0 && b < m);
+}
+
+// How many lattice-neighbor pairs join each pair of regions, keyed "a,b" with a < b.
+function touching(m, region) {
+  const touch = new Map();
+  for (let i = 0; i < m; i++) {
+    for (let j = 0; j < m; j++) {
+      for (const [ni, nj] of [[i + 1, j], [i, j + 1]]) {
+        if (ni < m && nj < m && region[i][j] !== region[ni][nj]) {
+          const key = [region[i][j], region[ni][nj]].sort((a, b) => a - b).join();
+          touch.set(key, (touch.get(key) || 0) + 1);
+        }
+      }
+    }
+  }
+  return touch;
+}
+
+function permutations(items) {
+  if (items.length <= 1) return [items];
+  return items.flatMap((x, k) => permutations([...items.slice(0, k), ...items.slice(k + 1)]).map((p) => [x, ...p]));
+}
+
+// Regions grown outward from scattered seed points, like countries on a map.
+// The start's blob comes first and the end's blob last; the blobs in between
+// are put in any order where each blob touches the next in at least `minTouch`
+// places. Returns null if no such order exists.
+function blobLattice(m, count, start, end, minTouch) {
+  if (count === 1) return Array.from({ length: m }, () => Array(m).fill(0));
+  const dist = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+  // Spread the seeds out: each new seed is the farthest of a few random candidates.
+  const seeds = [start];
+  while (seeds.length < count) {
+    const candidates = Array.from({ length: 12 }, () => [Math.floor(Math.random() * m), Math.floor(Math.random() * m)]);
+    const score = (n) => Math.min(...seeds.map((s) => dist(n, s)));
+    seeds.push(candidates.reduce((best, n) => (score(n) > score(best) ? n : best)));
+  }
+  if (new Set(seeds.map((s) => s.join())).size < count) return null;
+  const region = Array.from({ length: m }, () => Array(m).fill(-1));
+  const frontier = seeds.map(([i, j], k) => {
+    region[i][j] = k;
+    return latticeNeighbors(m, i, j);
+  });
+  const sizes = Array(count).fill(1);
+  // Always grow the smallest blob that still can, so sizes stay even.
+  for (;;) {
+    const growing = [...Array(count).keys()].filter((k) => frontier[k].length);
+    if (!growing.length) break;
+    const k = growing.reduce((a, b) => (sizes[b] < sizes[a] || (sizes[b] === sizes[a] && Math.random() < 0.5) ? b : a));
+    const f = frontier[k];
+    const pick = Math.floor(Math.random() * f.length);
+    [f[pick], f[f.length - 1]] = [f[f.length - 1], f[pick]];
+    const [i, j] = f.pop();
+    if (region[i][j] !== -1) continue;
+    region[i][j] = k;
+    sizes[k]++;
+    for (const n of latticeNeighbors(m, i, j)) if (region[n[0]][n[1]] === -1) f.push(n);
+  }
+
+  const first = region[start[0]][start[1]];
+  const last = region[end[0]][end[1]];
+  if (first === last) return null;
+  const touch = touching(m, region);
+  const middle = [...Array(count).keys()].filter((k) => k !== first && k !== last);
+  for (const mid of shuffle(permutations(middle))) {
+    const chain = [first, ...mid, last];
+    const linked = chain.slice(1).every((k, n) => (touch.get([chain[n], k].sort((a, b) => a - b).join()) || 0) >= minTouch);
+    if (linked) {
+      const position = new Map(chain.map((k, n) => [k, n]));
+      return region.map((row) => row.map((k) => position.get(k)));
+    }
+  }
+  return null;
+}
+
+// Regions that follow the solution of one big maze, so colors interlock like
+// fingers: carve a maze over the whole lattice, cut its start-to-end path into
+// `count` stretches of about equal weight, and give every dead-end branch the
+// region of the path square it hangs off.
+function tendrilLattice(m, count, start, end, minTouch) {
+  const key = (i, j) => i * m + j;
+  // One big maze (randomized depth-first search), remembering each square's parent.
+  const parent = new Map([[key(...start), -1]]);
+  const stack = [start];
+  while (stack.length) {
+    const cur = stack[stack.length - 1];
+    const next = latticeNeighbors(m, ...cur).filter(([i, j]) => !parent.has(key(i, j)));
+    if (!next.length) {
+      stack.pop();
+      continue;
+    }
+    const n = choice(next);
+    parent.set(key(...n), key(...cur));
+    stack.push(n);
+  }
+  const path = [key(...end)];
+  while (parent.get(path[path.length - 1]) !== -1) path.push(parent.get(path[path.length - 1]));
+  path.reverse();
+  const onPath = new Map(path.map((n, k) => [n, k]));
+
+  // Which path square each branch hangs off, and how much hangs off each.
+  const children = new Map();
+  for (const [n, p] of parent) if (p !== -1) children.set(p, [...(children.get(p) || []), n]);
+  const attach = new Int32Array(m * m);
+  const weight = Array(path.length).fill(0);
+  path.forEach((p, k) => {
+    const todo = [p];
+    while (todo.length) {
+      const n = todo.pop();
+      attach[n] = k;
+      weight[k]++;
+      for (const c of children.get(n) || []) if (!onPath.has(c)) todo.push(c);
+    }
+  });
+
+  // Cut the path where the running total passes each 1/count share.
+  const total = m * m;
+  const cuts = [];
+  let running = 0;
+  weight.forEach((w, k) => {
+    running += w;
+    if (cuts.length < count - 1 && running >= (total * (cuts.length + 1)) / count && k < path.length - 1) cuts.push(k);
+  });
+  if (cuts.length < count - 1) return null;
+  const segment = path.map((_, k) => cuts.filter((c) => k > c).length);
+  const region = Array.from({ length: m }, (_, i) => Array.from({ length: m }, (_, j) => segment[attach[key(i, j)]]));
+  const sizes = Array(count).fill(0);
+  region.forEach((row) => row.forEach((k) => sizes[k]++));
+  if (Math.min(...sizes) < (0.5 * total) / count) return null; // one branch was too big to split evenly
+  const touch = touching(m, region);
+  for (let k = 0; k + 1 < count; k++) if ((touch.get(`${k},${k + 1}`) || 0) < minTouch) return null;
+  return region;
+}
+
+// How the board is split into color regions.
+const REGION_STYLES = { bands: bandLattice, blobs: blobLattice, tendrils: tendrilLattice };
+
 const STEPS = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
 // One attempt at a full layout; returns null if this random layout doesn't work out.
-function layout(size, order) {
+function layout(size, order, style = "bands") {
   const [start, end] = corners(size);
-  const m = (start[1] + 1) / 2; // lattice nodes per side
+  const m = (end[1] + 1) / 2; // lattice nodes per side
   const colors = ["WHITE", ...order];
   const count = colors.length;
-  const band = bandLattice(m, count);
   const node = ([r, c]) => [(r - 1) / 2, (c - 1) / 2];
   const cell = (i, j) => [2 * i + 1, 2 * j + 1];
   const [si, sj] = node(start);
   const [ei, ej] = node(end);
-  if (band[si][sj] !== 0 || band[ei][ej] !== count - 1) return null;
+  const band = REGION_STYLES[style](m, count, [si, sj], [ei, ej], connectionsPerPair(size));
+  if (!band || band[si][sj] !== 0 || band[ei][ej] !== count - 1) return null;
 
   const inside = (i, j) => i >= 0 && i < m && j >= 0 && j < m;
   const grid = Array.from({ length: size }, () => Array(size).fill(WALL));
@@ -405,11 +544,12 @@ function addOpenings(grid, start, end, colors, connections) {
   return true;
 }
 
-// Build a maze with START in the upper right and END in the bottom left.
+// Build a maze with START in the upper left and END in the bottom right.
 // A layout is only accepted if every pair of neighboring regions touches in the
 // required number of places, there's exactly one route under the color rules,
 // and it can't be solved without taking on every color.
-function buildGrid(colorCount = MAX_COLORS, size = 100, maxAttempts = 200) {
+function buildGrid(colorCount = MAX_COLORS, size = 100, style = "bands", maxAttempts = 200) {
+  if (!REGION_STYLES[style]) throw new RangeError(`layout must be one of: ${Object.keys(REGION_STYLES).join(", ")}`);
   if (!(Number.isInteger(size) && size >= MIN_SIZE && size <= MAX_SIZE)) {
     throw new RangeError(`maze size must be between ${MIN_SIZE} and ${MAX_SIZE}`);
   }
@@ -420,7 +560,7 @@ function buildGrid(colorCount = MAX_COLORS, size = 100, maxAttempts = 200) {
   const [start, end] = corners(size);
   for (let i = 0; i < maxAttempts; i++) {
     const order = regionOrder(palette.slice(1));
-    const result = layout(size, order);
+    const result = layout(size, order, style);
     if (!result) continue;
     const { grid, changers } = result;
     if (!addOpenings(grid, start, end, ["WHITE", ...order], connectionsPerPair(size))) continue;
@@ -432,13 +572,25 @@ function buildGrid(colorCount = MAX_COLORS, size = 100, maxAttempts = 200) {
   throw new Error(`a ${size}×${size} maze is too small for ${colorCount} colors; try a larger size`);
 }
 
-function render(grid, canvas, cell, tick = 0) {
+// Passages sit on odd rows/columns and walls on even ones. Walls are drawn about
+// a quarter as thick as passages, so each row/column has its own size.
+function geometry(path) {
+  const wall = Math.max(1, Math.round(path / 4));
+  return {
+    path,
+    wall,
+    pos: (k) => Math.ceil(k / 2) * wall + Math.floor(k / 2) * path, // left/top edge of row/column k
+    span: (k) => (k % 2 ? path : wall),
+  };
+}
+
+function render(grid, canvas, geo, tick = 0) {
   const size = grid.length;
-  canvas.width = canvas.height = size * cell;
+  canvas.width = canvas.height = geo.pos(size);
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "black";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  grid.forEach((row, r) => row.forEach((value, c) => drawCell(ctx, grid, r, c, cell, tick)));
+  grid.forEach((row, r) => row.forEach((value, c) => drawCell(ctx, grid, r, c, geo, tick)));
 }
 
 // The colors a COLOR_CHANGE square flashes between: those of the squares it touches.
@@ -450,13 +602,16 @@ function touchingColors(grid, r, c) {
 }
 
 // `tick` counts flashes; COLOR_CHANGE squares show the next touching color each tick.
-function drawCell(ctx, grid, r, c, cell, tick = 0) {
-  const value = grid[r][c];
-  const x = c * cell;
-  const y = r * cell;
+function drawCell(ctx, grid, r, c, geo, tick = 0) {
+  const value = grid[r]?.[c];
+  if (value === undefined) return;
+  const x = geo.pos(c);
+  const y = geo.pos(r);
+  const w = geo.span(c);
+  const h = geo.span(r);
   if (value === WALL) {
     ctx.fillStyle = "black";
-    ctx.fillRect(x, y, cell, cell);
+    ctx.fillRect(x, y, w, h);
     return;
   }
   let fill = colorOf(value);
@@ -466,30 +621,39 @@ function drawCell(ctx, grid, r, c, cell, tick = 0) {
   }
   // No outline, so neighboring squares of one color merge into a single corridor.
   ctx.fillStyle = RGB[fill];
-  ctx.fillRect(x, y, cell, cell);
-  if (value.marker) drawMarker(ctx, value.marker, x, y, cell);
+  ctx.fillRect(x, y, w, h);
+  if (value.marker) drawMarker(ctx, value.marker, x, y, w);
 }
 
-// The player is a diamond in their current color, outlined black then white so
-// it reads on every square and can't be mistaken for the X or the circle.
-function drawPlayer(ctx, r, c, cell, color = "WHITE") {
-  const cx = c * cell + cell / 2;
-  const cy = r * cell + cell / 2;
-  const half = Math.max(1, cell * 0.36);
+// The player is a smiley face in their current color, as wide as most of the
+// path and outlined black then white so it reads on every square. On the thin
+// squares between passages it spills into the passage squares on either side.
+function drawPlayer(ctx, r, c, geo, color = "WHITE") {
+  const cx = geo.pos(c) + geo.span(c) / 2;
+  const cy = geo.pos(r) + geo.span(r) / 2;
+  const radius = Math.max(1, geo.path * 0.4);
+  const line = Math.max(1, geo.path / 16);
   ctx.beginPath();
-  ctx.moveTo(cx, cy - half);
-  ctx.lineTo(cx + half, cy);
-  ctx.lineTo(cx, cy + half);
-  ctx.lineTo(cx - half, cy);
-  ctx.closePath();
+  ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
   ctx.fillStyle = RGB[color];
   ctx.fill();
-  ctx.lineJoin = "round";
-  ctx.lineWidth = Math.max(1, cell / 8);
+  ctx.lineWidth = 3 * line;
   ctx.strokeStyle = "white";
   ctx.stroke();
-  ctx.lineWidth = Math.max(1, cell / 16);
+  ctx.lineWidth = line;
   ctx.strokeStyle = "black";
+  ctx.stroke();
+  if (radius < 4) return; // too small for a face
+  ctx.fillStyle = "black";
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.arc(cx + side * radius * 0.35, cy - radius * 0.25, Math.max(0.75, radius * 0.13), 0, 2 * Math.PI);
+    ctx.fill();
+  }
+  ctx.beginPath();
+  ctx.arc(cx, cy + radius * 0.05, radius * 0.5, 0.15 * Math.PI, 0.85 * Math.PI);
+  ctx.lineCap = "round";
+  ctx.lineWidth = Math.max(1, radius * 0.12);
   ctx.stroke();
 }
 
