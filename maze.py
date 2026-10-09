@@ -1,6 +1,7 @@
 """Build a 100x100 colored-light maze, save it, and render it as an image.
 
 Same rules as the web app (web/maze.js):
+
 - The player starts WHITE, which counts as "no color".
 - A player can always walk on WHITE squares. A colored player can also walk on
   any color made only of their own primaries: RED walks on red; MAGENTA
@@ -16,6 +17,15 @@ Same rules as the web app (web/maze.js):
   places: one COLOR_CHANGE doorway, and openings that the color rules block.
   So there are several ways between two colors, but following the color rules
   there is exactly one route through the maze.
+
+Typical usage (asks for the number of colors and a layout)::
+
+    python maze.py
+
+writes grid.json, grid.png, preview_start.png and preview_end.png. To build a
+maze from code::
+
+    grid, order, path = build_grid(5, size=61, style="blobs", seed=1)
 """
 
 import itertools
@@ -24,6 +34,7 @@ import math
 import random
 import sys
 from collections import deque
+from collections.abc import Callable, Iterator
 
 from PIL import Image, ImageDraw
 
@@ -59,9 +70,23 @@ MAX_COLORS = 1 + len(PRIMARY) + len(SECONDARY)
 MIN_SIZE_FOR_COLORS = {1: 5, 2: 5, 3: 9, 4: 15, 5: 21, 6: 25, 7: 31}
 STEPS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
+# One square of the grid: WALL, COLOR_CHANGE, a color name, or a start/end marker dict.
+Square = str | dict[str, str]
+Grid = list[list[Square]]
+# A (row, col) position; passages sit on odd rows and columns.
+Cell = tuple[int, int]
+# A lattice node (i, j), one per passage square: square (2i + 1, 2j + 1).
+Node = tuple[int, int]
+# A region number per lattice node; region 0 holds the start, count - 1 the end.
+RegionMap = list[list[int]]
+# A layout: (m, count, rng, start, end, min_touch) -> RegionMap, or None if this attempt failed.
+RegionStyle = Callable[[int, int, random.Random, Node, Node, int], RegionMap | None]
 
-def pick_palette(count, rng):
-    """Choose the first `count` colors of this sequence:
+
+def pick_palette(count: int, rng: random.Random) -> list[str]:
+    """Choose which colors a maze uses.
+
+    Takes the first `count` colors of this sequence:
 
     1. white
     2. red (P1)
@@ -71,7 +96,17 @@ def pick_palette(count, rng):
     6. a secondary containing P3 (S2)
     7. the last secondary (S3)
 
-    This picks which colors are used; region_order() decides the order of the regions.
+    region_order() then decides the order of the regions.
+
+    Args:
+        count: How many colors, white included (1 to MAX_COLORS).
+        rng: The random number generator.
+
+    Returns:
+        The colors, starting with "WHITE".
+
+    Raises:
+        ValueError: If `count` is out of range.
     """
     if not 1 <= count <= MAX_COLORS:
         raise ValueError(f"number of colors must be between 1 and {MAX_COLORS}")
@@ -88,8 +123,12 @@ def pick_palette(count, rng):
     return ["WHITE", p1, s1, p2, p3, s2, s3][:count]
 
 
-def ask_color_count():
-    """Menu: keep asking until the user enters a valid number of colors."""
+def ask_color_count() -> int:
+    """Ask for the number of colors until the answer is valid.
+
+    Returns:
+        A number from 1 to MAX_COLORS.
+    """
     print("How many colors should the maze use?")
     print("  1   white only")
     print("  2   white + red")
@@ -105,8 +144,12 @@ def ask_color_count():
         print(f"Please enter a whole number from 1 to {MAX_COLORS}.")
 
 
-def ask_layout():
-    """Menu: keep asking until the user picks a layout."""
+def ask_layout() -> str:
+    """Ask for a layout until the answer is valid.
+
+    Returns:
+        A key of REGION_STYLES.
+    """
     print("How should the colors be laid out?")
     print("  1   bands     wavy stripes from the upper left to the bottom right")
     print("  2   blobs     patches like countries on a map")
@@ -119,14 +162,30 @@ def ask_layout():
         print(f"Please enter a whole number from 1 to {len(styles)}.")
 
 
-def color_of(value):
+def color_of(value: Square) -> str:
+    """Return a square's color, looking inside start/end marker dicts.
+
+    Args:
+        value: The square.
+
+    Returns:
+        Its color, or WALL / COLOR_CHANGE as they are.
+    """
     return value["color"] if isinstance(value, dict) else value
 
 
-def step(player, frm, to, forbid=None):
-    """The player's color after moving from square `frm` to square `to`, or None if not allowed.
+def step(player: str, frm: Square, to: Square, forbid: str | None = None) -> str | None:
+    """Return the player's color after moving from one square to the next.
 
-    `forbid` names a color the player may not take on (used to check that every color is needed).
+    Args:
+        player: The player's current color, e.g. "RED".
+        frm: The square being left.
+        to: The square being entered.
+        forbid: A color the player may not take on; used to check that every
+            color is needed.
+
+    Returns:
+        The new color, or None if the move isn't allowed.
     """
     if to == WALL:
         return None
@@ -137,8 +196,16 @@ def step(player, frm, to, forbid=None):
     return player if can_enter(player, color_of(to)) else None
 
 
-def can_enter(player, square):
-    """Can a player of color `player` step onto a square of color `square`?"""
+def can_enter(player: str, square: str) -> bool:
+    """Return whether a player of one color may step onto a square of another.
+
+    Args:
+        player: The player's color.
+        square: The square's color.
+
+    Returns:
+        True if the move is allowed.
+    """
     if square == "WHITE":
         return True
     if player == "WHITE":
@@ -146,22 +213,35 @@ def can_enter(player, square):
     return MASK[square] & ~MASK[player] == 0
 
 
-def corners(size=SIZE):
-    """Start is the upper-left open cell, end is the bottom-right open cell.
+def corners(size: int = SIZE) -> tuple[Cell, Cell]:
+    """Return the start and end squares: the upper-left and bottom-right open cells.
 
     Passages sit on odd coordinates, so the outermost usable index is the largest odd one.
+
+    Args:
+        size: Squares per side.
+
+    Returns:
+        (start, end).
     """
     last = size - 2 if size % 2 else size - 3
     return (1, 1), (last, last)
 
 
-def region_order(colors, rng):
+def region_order(colors: list[str], rng: random.Random) -> list[str]:
     """Order the non-white colors so each region needs a new color.
 
     A color right after one containing it (red after magenta) could be walked
     through without changing. The first color (red) always comes right after
     white. Primaries before secondaries always works; shuffling a few times
     first gives more variety.
+
+    Args:
+        colors: The non-white colors from pick_palette(), red first.
+        rng: The random number generator.
+
+    Returns:
+        The same colors in region order.
     """
     if not colors:
         return []
@@ -173,11 +253,23 @@ def region_order(colors, rng):
     return [first] + [c for c in rest if c in PRIMARY] + [c for c in rest if c in SECONDARY]
 
 
-def band_lattice(m, count, rng, start, end, min_touch):
-    """Split the passage lattice into `count` equal-size wavy diagonal bands.
+def band_lattice(m: int, count: int, rng: random.Random, start: Node, end: Node, min_touch: int) -> RegionMap:
+    """The "bands" layout: split the lattice into `count` equal-size wavy diagonal bands.
 
-    Bands run from the upper left to the bottom right.
+    Bands run from the upper left to the bottom right. This layout always
+    succeeds, so `start`, `end` and `min_touch` (shared by all layouts) are unused.
     TODO(expert mode): allow several separate regions per color.
+
+    Args:
+        m: Lattice nodes per side.
+        count: How many regions.
+        rng: The random number generator.
+        start: The start's lattice node.
+        end: The end's lattice node.
+        min_touch: How many places each pair of neighboring regions must touch.
+
+    Returns:
+        The regions.
     """
     waves = [(0.35 / count * rng.random(), 1 + rng.random() * 2, rng.random() * 2 * math.pi) for _ in range(2)]
     span = max(1, 2 * (m - 1))
@@ -195,12 +287,30 @@ def band_lattice(m, count, rng, start, end, min_touch):
     return band
 
 
-def _lattice_neighbors(m, i, j):
+def _lattice_neighbors(m: int, i: int, j: int) -> list[Node]:
+    """Return the lattice nodes next to (i, j), up/down/left/right, inside the lattice.
+
+    Args:
+        m: Lattice nodes per side.
+        i: Row.
+        j: Column.
+
+    Returns:
+        The neighbors.
+    """
     return [(i + di, j + dj) for di, dj in STEPS if 0 <= i + di < m and 0 <= j + dj < m]
 
 
-def _touching(m, region):
-    """How many lattice-neighbor pairs join each pair of regions: {(a, b): count} with a < b."""
+def _touching(m: int, region: RegionMap) -> dict[tuple[int, int], int]:
+    """Count how many lattice-neighbor pairs join each pair of regions.
+
+    Args:
+        m: Lattice nodes per side.
+        region: The regions.
+
+    Returns:
+        {(a, b): count} with a < b.
+    """
     touch = {}
     for i in range(m):
         for j in range(m):
@@ -211,12 +321,23 @@ def _touching(m, region):
     return touch
 
 
-def blob_lattice(m, count, rng, start, end, min_touch):
-    """Regions grown outward from scattered seed points, like countries on a map.
+def blob_lattice(m: int, count: int, rng: random.Random, start: Node, end: Node, min_touch: int) -> RegionMap | None:
+    """The "blobs" layout: regions grown outward from scattered seed points, like countries on a map.
 
     The start's blob comes first and the end's blob last; the blobs in between
     are put in any order where each blob touches the next in at least
-    `min_touch` places. Returns None if no such order exists.
+    `min_touch` places.
+
+    Args:
+        m: Lattice nodes per side.
+        count: How many regions.
+        rng: The random number generator.
+        start: The start's lattice node.
+        end: The end's lattice node.
+        min_touch: How many places each pair of neighboring regions must touch.
+
+    Returns:
+        The regions, or None if no such order exists.
     """
     if count == 1:
         return [[0] * m for _ in range(m)]
@@ -265,12 +386,23 @@ def blob_lattice(m, count, rng, start, end, min_touch):
     return None
 
 
-def tendril_lattice(m, count, rng, start, end, min_touch):
-    """Regions that follow the solution of one big maze, so colors interlock like fingers.
+def tendril_lattice(m: int, count: int, rng: random.Random, start: Node, end: Node, min_touch: int) -> RegionMap | None:
+    """The "tendrils" layout: regions that follow the solution of one big maze, so colors interlock like fingers.
 
     Carve a maze over the whole lattice, cut its start-to-end path into `count`
     stretches of about equal weight, and give every dead-end branch the region
     of the path square it hangs off.
+
+    Args:
+        m: Lattice nodes per side.
+        count: How many regions.
+        rng: The random number generator.
+        start: The start's lattice node.
+        end: The end's lattice node.
+        min_touch: How many places each pair of neighboring regions must touch.
+
+    Returns:
+        The regions, or None if they came out too uneven or don't touch enough.
     """
     # One big maze (randomized depth-first search), remembering each square's parent.
     parent = {start: None}
@@ -328,8 +460,21 @@ def tendril_lattice(m, count, rng, start, end, min_touch):
 REGION_STYLES = {"bands": band_lattice, "blobs": blob_lattice, "tendrils": tendril_lattice}
 
 
-def layout(size, order, rng, style="bands"):
-    """One attempt at a full layout; returns None if this random layout doesn't work out."""
+def layout(size: int, order: list[str], rng: random.Random, style: str = "bands") -> Grid | None:
+    """Make one attempt at a full layout.
+
+    Splits the board into regions, carves each region as its own maze, and
+    places a COLOR_CHANGE doorway from each region to the next.
+
+    Args:
+        size: Squares per side.
+        order: The non-white colors in region order.
+        rng: The random number generator.
+        style: A key of REGION_STYLES.
+
+    Returns:
+        The grid, or None if this random layout doesn't work out.
+    """
     start, end = corners(size)
     m = (end[1] + 1) // 2  # lattice nodes per side
     colors = ["WHITE"] + order
@@ -402,11 +547,20 @@ def layout(size, order, rng, style="bands"):
     return grid
 
 
-def solve(grid, start, end, forbid=None):
-    """Breadth-first search over (square, player color).
+def solve(grid: Grid, start: Cell, end: Cell, forbid: str | None = None) -> list[Cell] | None:
+    """Find the shortest route that follows the color rules.
 
-    Returns the shortest list of squares from start to end, or None.
-    With `forbid`, the player may never take on that color.
+    A breadth-first search over (square, player color), so a route may pass a
+    square twice in different colors. The player starts WHITE.
+
+    Args:
+        grid: The maze.
+        start: Where to start.
+        end: Where to finish.
+        forbid: A color the player may never take on.
+
+    Returns:
+        The squares from start to end, or None if there's no way.
     """
     size = len(grid)
     first = (start[0], start[1], "WHITE")
@@ -435,17 +589,30 @@ def solve(grid, start, end, forbid=None):
     return None
 
 
-def connections_per_pair(size):
-    """How many places each pair of neighboring regions must touch."""
+def connections_per_pair(size: int) -> int:
+    """Return how many places each pair of neighboring regions must touch.
+
+    Args:
+        size: Squares per side.
+
+    Returns:
+        floor(log10(size x size)).
+    """
     return math.floor(math.log10(size * size))
 
 
-def boundary_squares(grid, pair=None, open_only=True):
-    """Wall-position squares between passages of two different colors.
+def boundary_squares(grid: Grid, pair: frozenset[str] | None = None,
+                     open_only: bool = True) -> Iterator[tuple[int, int, frozenset[str]]]:
+    """Find the wall-position squares between passages of two different colors.
 
-    Yields (row, col, frozenset of the two colors). With `pair`, only squares
-    between those two colors; with open_only=False, closed walls instead of
-    open squares (doorways and openings).
+    Args:
+        grid: The maze.
+        pair: Only squares between these two colors; None for any two.
+        open_only: True for open squares (doorways and openings), False for
+            closed walls instead.
+
+    Yields:
+        (row, col, the two colors) for each such square.
     """
     size = len(grid)
     for r in range(1, size - 1):
@@ -460,10 +627,18 @@ def boundary_squares(grid, pair=None, open_only=True):
                 yield r, c, colors
 
 
-def route_squares(grid, start, end):
-    """Squares that could be on a route, keyed by (row, col) with their degree.
+def route_squares(grid: Grid, start: Cell, end: Cell) -> dict[Cell, int]:
+    """Find the squares that could be on a route, with their degree.
 
     Dead-end branches are trimmed leaf by leaf (start and end are never trimmed).
+
+    Args:
+        grid: The maze.
+        start: The start square.
+        end: The end square.
+
+    Returns:
+        {square: number of kept neighbors} for every kept square.
     """
     size = len(grid)
     keep = {(r, c) for r in range(size) for c in range(size) if grid[r][c] != WALL}
@@ -486,12 +661,23 @@ def route_squares(grid, start, end):
     return {cell: degree[cell] for cell in keep}
 
 
-def count_solutions(grid, start, end, colored, limit):
+def count_solutions(grid: Grid, start: Cell, end: Cell, colored: bool, limit: int) -> int:
     """Count routes from start to end that never revisit a square, stopping at `limit`.
 
-    With `colored`, a route must also follow the color rules. Squares in
-    dead-end branches can't be on any route, so they're trimmed first; what's
-    left is junctions joined by corridors, and routes are counted over those.
+    Squares in dead-end branches can't be on any route, so they're trimmed
+    first; what's left is junctions joined by corridors, and routes are counted
+    over those. Recurses once per junction on a route, so large mazes need a
+    raised recursion limit.
+
+    Args:
+        grid: The maze.
+        start: The start square.
+        end: The end square.
+        colored: Whether a route must also follow the color rules.
+        limit: Stop counting once this many routes are found.
+
+    Returns:
+        The number of routes, at most `limit`.
     """
     start, end = tuple(start), tuple(end)
     degree = route_squares(grid, start, end)
@@ -551,13 +737,24 @@ def count_solutions(grid, start, end, colored, limit):
     return count
 
 
-def add_openings(grid, start, end, colors, connections, rng):
+def add_openings(grid: Grid, start: Cell, end: Cell, colors: list[str], connections: int,
+                 rng: random.Random) -> bool:
     """Open walls between each pair of neighboring regions until they touch in `connections` places.
 
     The COLOR_CHANGE doorway counts as one. An opening is only kept if there is
     still exactly one route under the color rules. An opened square takes the
-    color of one side so every color stays one region. Returns False if a
-    boundary can't get enough openings.
+    color of one side so every color stays one region.
+
+    Args:
+        grid: The maze; changed in place.
+        start: The start square.
+        end: The end square.
+        colors: All colors in region order, white first.
+        connections: How many places each pair must touch.
+        rng: The random number generator.
+
+    Returns:
+        False if a boundary can't get enough openings.
     """
     for first, second in zip(colors, colors[1:]):
         boundary = [(r, c) for r, c, _ in boundary_squares(grid, frozenset((first, second)), open_only=False)]
@@ -577,13 +774,29 @@ def add_openings(grid, start, end, colors, connections, rng):
     return True
 
 
-def build_grid(color_count=MAX_COLORS, size=SIZE, seed=None, max_attempts=200, style="bands"):
+def build_grid(color_count: int = MAX_COLORS, size: int = SIZE, seed: int | None = None,
+               max_attempts: int = 200, style: str = "bands") -> tuple[Grid, list[str], list[Cell]]:
     """Build a maze with START in the upper left and END in the bottom right.
 
     A layout is only accepted if every pair of neighboring regions touches in
     the required number of places, there's exactly one route under the color
     rules, and it can't be solved without taking on every color.
-    Returns (grid, region color order, shortest solution).
+
+    Args:
+        color_count: How many colors, white included (1 to MAX_COLORS).
+        size: Squares per side.
+        seed: Seed for the random number generator; the same seed and settings
+            give the same maze. None for a different maze each time.
+        max_attempts: Random layouts to try before giving up.
+        style: How the color regions are laid out: a key of REGION_STYLES.
+
+    Returns:
+        (grid, the colors in region order starting with white, the shortest solution).
+
+    Raises:
+        ValueError: If the layout or color count is unknown, or the size is too
+            small for that many colors.
+        RuntimeError: If no layout worked within `max_attempts`.
     """
     if style not in REGION_STYLES:
         raise ValueError(f"layout must be one of: {', '.join(REGION_STYLES)}")
@@ -607,8 +820,17 @@ def build_grid(color_count=MAX_COLORS, size=SIZE, seed=None, max_attempts=200, s
     raise RuntimeError(f"a {size}x{size} maze is too small for {color_count} colors; try a larger size")
 
 
-def touching_colors(grid, r, c):
-    """The colors of the squares a COLOR_CHANGE square touches, in a fixed order."""
+def touching_colors(grid: Grid, r: int, c: int) -> list[str]:
+    """Return the colors of the squares a COLOR_CHANGE square touches.
+
+    Args:
+        grid: The maze.
+        r: The doorway's row.
+        c: The doorway's column.
+
+    Returns:
+        The distinct colors next to it, in a fixed order (up, down, left, right).
+    """
     colors = []
     for dr, dc in STEPS:
         if 0 <= r + dr < len(grid) and 0 <= c + dc < len(grid):
@@ -618,8 +840,18 @@ def touching_colors(grid, r, c):
     return colors
 
 
-def render(grid, path, cell=CELL):
-    """Passages (odd rows/columns) are `cell` pixels thick, walls (even ones) a quarter of that."""
+def render(grid: Grid, path: str, cell: int = CELL) -> None:
+    """Save a picture of the maze.
+
+    Passages (odd rows/columns) are `cell` pixels thick, walls (even ones) a
+    quarter of that. Doorways can't flash in a still image, so they're split
+    diagonally between the colors they join.
+
+    Args:
+        grid: The maze, or a cropped part of it.
+        path: Where to save the image; the format follows the extension, e.g. ".png".
+        cell: Passage width in pixels.
+    """
     # An even-sized grid ends in two all-wall rows/columns; the second sits on an
     # odd (passage-width) index and would make the right and bottom borders thick,
     # so leave it out (but keep it in cropped previews, where it holds passages).
