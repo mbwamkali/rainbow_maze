@@ -3,8 +3,9 @@
  *
  * Receives `{colors, size, style}` (the arguments to buildGrid()) and replies with
  * `{result}`, the finished Maze, or `{error}`, the message of the error it threw.
+ * It loads maze.js with its own version query, so both come from the same release.
  */
-importScripts("maze.js");
+importScripts(`maze.js${self.location.search}`);
 
 onmessage = ({ data: { colors, size, style } }) => {
   try {

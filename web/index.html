@@ -447,7 +447,10 @@
       <button id="win-main" type="button">Main menu</button>
     </div>
   </dialog>
-  <script src="maze.js"></script>
-  <script src="app.js"></script>
+  <!-- The release version. Bump it (in both tags) with each release, so browsers
+       fetch the new scripts instead of mixing cached old ones with a new page.
+       app.js passes it on to worker.js, and worker.js to the maze.js it loads. -->
+  <script src="maze.js?v=1.0.0"></script>
+  <script src="app.js?v=1.0.0"></script>
 </body>
 </html>

@@ -225,6 +225,13 @@ for (const icon of document.querySelectorAll("canvas[data-icon]")) {
 }
 
 /**
+ * The release version query (e.g. "?v=1.0.0") from this script's own URL in
+ * index.html, passed on to the worker so every script comes from the same release.
+ * @type {string}
+ */
+const ASSET_VERSION = new URL(document.currentScript.src).search;
+
+/**
  * Build a maze in a Web Worker so big mazes don't freeze the page.
  *
  * If workers aren't allowed here (some sandboxed pages), build on the main
@@ -248,7 +255,7 @@ function buildMaze(colors, size, style) {
     if (workerBroken) return onMainThread();
     let worker;
     try {
-      worker = new Worker("worker.js");
+      worker = new Worker(`worker.js${ASSET_VERSION}`);
     } catch {
       workerBroken = true;
       return onMainThread();

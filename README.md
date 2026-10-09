@@ -94,3 +94,21 @@ on `main`, the web app is published to GitHub Pages (`.github/workflows/pages.ym
 | `web/manifest.webmanifest`, `web/icons/` | For installing to a phone's home screen |
 | `web/tests/` | Browser tests and their runner |
 | `maze.py` | The Python generator |
+| `CHANGELOG.md` | What changed in each release |
+| `LICENSE` | The MIT license |
+
+## Releasing
+
+1. Update `CHANGELOG.md`: move the changes under a new version heading with
+   today's date, and add its link at the bottom.
+2. Bump the version on both `<script>` tags at the bottom of `web/index.html`
+   (`maze.js?v=…` and `app.js?v=…`). This makes browsers fetch the new scripts
+   instead of mixing cached old ones with the new page; the web worker picks up
+   the same version automatically.
+3. Merge to `main`. When the tests pass, GitHub Pages publishes it.
+4. Tag the merge commit (`git tag v1.2.3 && git push origin v1.2.3`) and create
+   a GitHub Release from the tag, with the changelog entry as its notes.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
