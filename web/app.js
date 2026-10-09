@@ -18,11 +18,17 @@ const info = document.getElementById("info");
 const statusLabel = document.getElementById("status");
 const message = document.getElementById("message");
 const touchControls = window.matchMedia("(pointer: coarse)");
+// Phones get a menu instead of some toolbar buttons; keep in sync with index.html.
+const MOBILE_VIEW = "(pointer: coarse) and (max-width: 760px), (pointer: coarse) and (max-height: 500px)";
+const mobileView = window.matchMedia(MOBILE_VIEW);
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const pauseMenu = document.getElementById("pause-menu");
 const winMenu = document.getElementById("win-menu");
 const routeButton = document.getElementById("route");
 const confettiCanvas = document.getElementById("confetti");
+const muteButton = document.getElementById("mute");
+const mapShow = document.getElementById("map-show");
+const volumeInput = document.getElementById("volume");
 
 const COLOR_HINTS = {
   1: "White only",
@@ -189,7 +195,9 @@ function setBuilding(on) {
   building = on;
   buildingNote.hidden = !on;
   stage.classList.toggle("busy", on);
-  for (const id of ["again", "undo", "restart", "hint", "route"]) document.getElementById(id).disabled = on;
+  for (const id of ["again", "undo", "restart", "hint", "route", "m-undo", "m-restart", "m-route"]) {
+    document.getElementById(id).disabled = on;
+  }
 }
 
 async function generate() {
@@ -227,10 +235,110 @@ async function generate() {
   length.className = "meta";
   length.textContent = `${size}×${size} · ${style} · shortest route ${shortestMoves()} moves`;
   info.append(length);
+  document.getElementById("m-info").innerHTML = info.innerHTML; // the phone menu's copy
   minimapBase = drawMinimapBase(current.grid);
   layoutView(null);
   centerOn(...geo.center(...player));
   paint();
+}
+
+// Sound effects, synthesized with Web Audio so there are no files to load. Sound
+// starts muted; the viewer's mute and volume choices are remembered in this browser.
+const SOUND_KEY = "rainbow-maze-sound";
+const sound = { muted: true, volume: 60 }; // volume 0-100
+try {
+  Object.assign(sound, JSON.parse(localStorage.getItem(SOUND_KEY)) || {});
+} catch {}
+let audio = null; // { ctx, master }, created on the first sound after unmuting
+
+function saveSound() {
+  try {
+    localStorage.setItem(SOUND_KEY, JSON.stringify(sound));
+  } catch {}
+}
+
+// Perceived loudness grows roughly with the square of the gain.
+const masterGain = () => (sound.volume / 100) ** 2;
+
+function getAudio() {
+  if (!audio) {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return null;
+    const ctx = new Context();
+    const master = ctx.createGain();
+    master.gain.value = masterGain();
+    master.connect(ctx.destination);
+    audio = { ctx, master };
+  }
+  // Browsers can refuse to resume (e.g. autoplay rules); then the game just stays quiet.
+  if (audio.ctx.state === "suspended") audio.ctx.resume().catch(() => {});
+  return audio;
+}
+
+// One note: `freq` gliding to `to` (Hz), starting `at` seconds from now.
+function tone(a, { freq, to = freq, type = "sine", at = 0, length = 0.1, gain = 0.2 }) {
+  const start = a.ctx.currentTime + at;
+  const osc = a.ctx.createOscillator();
+  const env = a.ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, start);
+  if (to !== freq) osc.frequency.exponentialRampToValueAtTime(to, start + length);
+  env.gain.setValueAtTime(0.0001, start);
+  env.gain.exponentialRampToValueAtTime(gain, start + 0.005);
+  env.gain.exponentialRampToValueAtTime(0.0001, start + length);
+  osc.connect(env).connect(a.master);
+  osc.start(start);
+  osc.stop(start + length + 0.02);
+}
+
+// Each color has its own note (semitones above C5), so color changes sound different.
+const COLOR_NOTES = { WHITE: 0, RED: 2, YELLOW: 4, GREEN: 5, CYAN: 7, BLUE: 9, MAGENTA: 11 };
+const note = (semitones) => 523.25 * 2 ** (semitones / 12);
+
+// name: "step" (with steps and duration in ms, one tick per square as the smiley
+// passes it), "bump", "color" (with color, after delay ms), or "win".
+function playSound(name, { steps = 1, duration = 0, color = "WHITE", delay = 0 } = {}) {
+  if (sound.muted || !sound.volume) return;
+  const a = getAudio();
+  if (!a) return;
+  const at = delay / 1000;
+  if (name === "step") {
+    // The slide eases out, so square k is reached at 1 - (1 - k/steps)^(1/3) of the way.
+    const ticks = Math.min(steps, 16);
+    for (let k = 0; k < ticks; k++) {
+      const when = (1 - (1 - k / ticks) ** (1 / 3)) * duration / 1000;
+      tone(a, { freq: 700, to: 560, type: "triangle", at: at + when, length: 0.045, gain: 0.12 });
+    }
+  } else if (name === "bump") {
+    tone(a, { freq: 150, to: 60, at, length: 0.16, gain: 0.3 });
+    tone(a, { freq: 95, to: 55, type: "square", at, length: 0.05, gain: 0.04 });
+  } else if (name === "color") {
+    const f = note(COLOR_NOTES[color] ?? 0);
+    tone(a, { freq: f, at, length: 0.25, gain: 0.16 });
+    tone(a, { freq: f * 1.5, at: at + 0.08, length: 0.3, gain: 0.13 });
+  } else if (name === "win") {
+    [0, 4, 7, 12].forEach((semitones, k) =>
+      tone(a, { freq: note(semitones), type: "triangle", at: at + k * 0.11, length: k === 3 ? 0.7 : 0.3, gain: 0.24 }),
+    );
+  }
+}
+
+function setSound(changes) {
+  Object.assign(sound, changes);
+  saveSound();
+  if (audio) audio.master.gain.setTargetAtTime(masterGain(), audio.ctx.currentTime, 0.02);
+  updateSoundControls();
+}
+
+function updateSoundControls() {
+  const on = !sound.muted && sound.volume > 0;
+  for (const button of [muteButton, document.getElementById("m-mute")]) {
+    button.setAttribute("aria-pressed", String(!on));
+    button.textContent = on ? "🔊" : "🔇";
+    button.setAttribute("aria-label", on ? "Sound on" : "Sound off");
+    button.title = `${on ? "Sound on" : "Sound off"} (M)`;
+  }
+  volumeInput.value = document.getElementById("m-volume").value = sound.volume;
 }
 
 // Back to the start of the current maze with a clean slate.
@@ -289,10 +397,20 @@ function layoutView(path) {
   const size = visibleSize(current.grid);
   const dpr = window.devicePixelRatio || 1;
   const top = stage.getBoundingClientRect().top + window.scrollY;
-  const below = touchControls.matches ? dpad.offsetHeight + 32 : 16;
-  const card = 18; // the card's padding and border around the canvas
-  const roomW = Math.max(160, mazeScreen.clientWidth - card) * dpr;
-  const roomH = Math.max(160, window.innerHeight - top - below - card) * dpr;
+  // Room to leave under the maze: the exit button in full screen, else the arrow
+  // pad, unless the pad sits beside the maze (touch screens held sideways).
+  const exitButton = document.getElementById("exit-fullscreen");
+  const padBeside = getComputedStyle(document.querySelector(".play-area")).display === "flex";
+  const below = fullScreen()
+    ? exitButton.offsetHeight + 16
+    : touchControls.matches && !padBeside ? dpad.offsetHeight + 32 : 16;
+  const beside = padBeside && dpad.offsetWidth ? dpad.offsetWidth + 16 : 0;
+  // The card's padding and border around the canvas (none on phones).
+  const box = getComputedStyle(stage);
+  const edge = (a, b) => parseFloat(box[`padding${a}`]) + parseFloat(box[`padding${b}`]) +
+    parseFloat(box[`border${a}Width`]) + parseFloat(box[`border${b}Width`]);
+  const roomW = Math.max(160, mazeScreen.clientWidth - edge("Left", "Right") - beside) * dpr;
+  const roomH = Math.max(160, window.innerHeight - top - below - edge("Top", "Bottom")) * dpr;
   const room = Math.min(roomW, roomH);
   fitPath = Math.max(2, Math.floor((room * 1.6) / size));
   while (fitPath > 2 && geometry(fitPath, dpr).pos(size) > room) fitPath--;
@@ -422,10 +540,15 @@ function updateMinimap() {
   const size = visibleSize(current.grid);
   const mazePx = geo.pos(size);
   const zoomed = mazePx > view.w || mazePx > view.h;
-  minimap.hidden = !zoomed;
-  if (!zoomed) return;
+  // On phones the map is smaller, and tapping it folds it away to a Map button.
+  const phone = mobileView.matches;
+  const folded = zoomed && phone && minimapFolded;
+  minimap.hidden = !zoomed || folded;
+  mapShow.hidden = !folded;
+  if (minimap.hidden) return;
   const dpr = geo.dpr;
-  const side = Math.round(Math.min(160, view.w / dpr / 3, view.h / dpr / 3) * dpr);
+  const share = phone ? 4 : 3;
+  const side = Math.round(Math.min(phone ? 120 : 160, view.w / dpr / share, view.h / dpr / share) * dpr);
   if (minimap.width !== side) {
     minimap.width = minimap.height = side;
     minimap.style.width = minimap.style.height = `${side / dpr}px`;
@@ -475,7 +598,7 @@ function updateStatus() {
   const walkable = current.palette.filter((color) => canEnter(playerColor, color));
   statusLabel.innerHTML =
     `<span>You are ${swatch(playerColor)} <b>${playerColor.toLowerCase()}</b></span>` +
-    `<span>Walks on ${walkable.map(swatch).join("")}</span>` +
+    `<span class="walks">Walks on ${walkable.map(swatch).join("")}</span>` +
     `<span>Moves: <b>${moves}</b></span>` +
     `<span>Time: <b id="time">${formatTime(elapsed())}</b></span>`;
 }
@@ -544,6 +667,8 @@ function move(dir, run = false) {
   const first = tryMove(player, playerColor, dir);
   if (first.blocked !== undefined) {
     showMessage(first.blocked);
+    playSound("bump");
+    buzz(25);
     animate({ cells: [player, first.mid], points: [player], fills: [playerColor], toward: dir, bump: true });
     return;
   }
@@ -579,6 +704,12 @@ function move(dir, run = false) {
     drawPlayerNow(canvas.getContext("2d"));
   }
   animate({ cells, points: cells, fills, toward: dir, steps });
+  playSound("step", { steps, duration: anim.duration });
+  // A run stops right after a color change, so the change is at the end of the slide.
+  if (color !== playerColor) {
+    playSound("color", { color, delay: anim.duration * 0.6 });
+    buzz([15, 40, 15], anim.duration * 0.6);
+  }
   player = at;
   playerColor = color;
   moves += steps;
@@ -699,8 +830,10 @@ function toggleRoute() {
 }
 
 function setRouteButton(on) {
-  routeButton.setAttribute("aria-pressed", on);
-  routeButton.textContent = on ? "Hide route" : "Show route";
+  for (const button of [routeButton, document.getElementById("m-route")]) {
+    button.setAttribute("aria-pressed", on);
+    button.textContent = on ? "Hide route" : "Show route";
+  }
 }
 
 // Slide the smiley through `points` (squares), blending between `fills` (colors),
@@ -780,6 +913,8 @@ function showWin() {
   ];
   document.getElementById("win-stats").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
   winMenu.showModal();
+  playSound("win");
+  buzz([40, 60, 40, 60, 80]);
   confetti();
 }
 
@@ -830,6 +965,8 @@ function finishAnimation() {
 }
 
 function mainMenu() {
+  setMenu(false);
+  setFullScreen(false);
   pauseMenu.close();
   winMenu.close();
   pauseTimer();
@@ -866,6 +1003,23 @@ document.getElementById("win-main").addEventListener("click", mainMenu);
 document.getElementById("zoom-in").addEventListener("click", zoomIn);
 document.getElementById("zoom-out").addEventListener("click", zoomOut);
 document.getElementById("zoom-fit").addEventListener("click", zoomFit);
+// Unmuting (or moving the volume) plays a tick so you can hear the level.
+function toggleMute() {
+  setSound({ muted: !sound.muted, volume: sound.volume || 60 });
+  playSound("step");
+}
+muteButton.addEventListener("click", (e) => {
+  e.currentTarget.blur();
+  toggleMute();
+});
+for (const slider of [volumeInput, document.getElementById("m-volume")]) {
+  slider.addEventListener("input", () => setSound({ volume: Number(slider.value), muted: false }));
+  slider.addEventListener("change", () => {
+    slider.blur(); // so arrow keys go back to moving
+    playSound("step");
+  });
+}
+updateSoundControls();
 for (const [id, action] of [["undo", undo], ["restart", restart], ["hint", hint], ["route", toggleRoute]]) {
   document.getElementById(id).addEventListener("click", (e) => {
     e.currentTarget.blur(); // keep Enter/Space from repeating it while playing
@@ -879,6 +1033,7 @@ pauseMenu.addEventListener("close", () => {
 
 const ZOOM_KEYS = { "+": zoomIn, "=": zoomIn, "-": zoomOut, _: zoomOut, 0: zoomFit };
 const PLAY_KEYS = {
+  m: toggleMute,
   z: undo,
   u: undo,
   backspace: undo,
@@ -889,6 +1044,14 @@ const PLAY_KEYS = {
 window.addEventListener("keydown", (e) => {
   // Open dialogs handle their own keys; Esc closes them (i.e. resumes) natively.
   if (mazeScreen.hidden || pauseMenu.open || winMenu.open) return;
+  if (e.key === "Escape" && !mobileMenu.hidden) {
+    setMenu(false);
+    return;
+  }
+  if (e.key === "Escape" && fullScreen()) {
+    setFullScreen(false);
+    return;
+  }
   const dir = DIRECTIONS[e.key] || DIRECTIONS[e.key.toLowerCase()];
   const key = e.key.toLowerCase();
   if (e.key === "Escape") {
@@ -922,12 +1085,143 @@ document.getElementById("download").addEventListener("click", () => {
   link.click();
   URL.revokeObjectURL(link.href);
 });
-window.addEventListener("resize", () => {
+// Fit the maze to the space again, keeping the same zoom relative to "fit".
+function relayout() {
   if (!current || mazeScreen.hidden || building) return;
   finishAnimation();
-  const ratio = geo.path / fitPath; // keep the same zoom relative to "fit"
+  const ratio = geo.path / fitPath;
   layoutView(null);
   zoomTo(Math.round(fitPath * ratio));
+}
+window.addEventListener("resize", relayout);
+
+// Phones: a menu with undo, restart, the route, and a switch for the arrow pad,
+// which is hidden by default there (the choice is remembered in this browser).
+const PAD_KEY = "rainbow-maze-pad";
+const menuToggle = document.getElementById("menu-toggle");
+const mobileMenu = document.getElementById("mobile-menu");
+const padToggle = document.getElementById("pad-toggle");
+function setMenu(open) {
+  mobileMenu.hidden = !open;
+  menuToggle.setAttribute("aria-expanded", String(open));
+  menuToggle.textContent = open ? "✕ Close" : "☰ Menu";
+}
+function setPad(on, save = true) {
+  document.body.classList.toggle("show-pad", on);
+  padToggle.checked = on;
+  if (save) {
+    try {
+      localStorage.setItem(PAD_KEY, on ? "1" : "0");
+    } catch {}
+  }
+  relayout(); // the pad takes room from the maze
+}
+try {
+  setPad(localStorage.getItem(PAD_KEY) === "1", false);
+} catch {
+  setPad(false, false);
+}
+menuToggle.addEventListener("click", () => setMenu(mobileMenu.hidden));
+padToggle.addEventListener("change", () => setPad(padToggle.checked));
+const MENU_ACTIONS = [
+  ["m-undo", undo],
+  ["m-restart", restart],
+  ["m-route", toggleRoute],
+  ["m-new", () => (setMenu(false), generate())],
+  ["m-settings", mainMenu],
+  ["m-mute", toggleMute],
+  ["m-zoom-out", zoomOut],
+  ["m-zoom-in", zoomIn],
+  ["m-zoom-fit", zoomFit],
+];
+for (const [id, action] of MENU_ACTIONS) document.getElementById(id).addEventListener("click", action);
+
+// Phones: tap the minimap to fold it away, and the Map button to bring it back.
+const MAP_KEY = "rainbow-maze-minimap";
+let minimapFolded = false;
+try {
+  minimapFolded = localStorage.getItem(MAP_KEY) === "folded";
+} catch {}
+function foldMinimap(folded) {
+  minimapFolded = folded;
+  try {
+    localStorage.setItem(MAP_KEY, folded ? "folded" : "shown");
+  } catch {}
+  if (current) updateMinimap();
+}
+minimap.addEventListener("click", () => foldMinimap(true));
+mapShow.addEventListener("click", () => foldMinimap(false));
+
+// Vibration on touch devices that support it (Android, not iPhones): a short buzz
+// for a bump, a double one for a color change, and a longer pattern for winning.
+// On by default; the switch is in the phone menu, and the choice is remembered.
+const VIBRATE_KEY = "rainbow-maze-vibrate";
+const vibrateToggle = document.getElementById("vibrate-toggle");
+let vibrateOn = true;
+try {
+  vibrateOn = localStorage.getItem(VIBRATE_KEY) !== "off";
+} catch {}
+const canVibrate = () => touchControls.matches && typeof navigator.vibrate === "function";
+function buzz(pattern, delay = 0) {
+  if (!vibrateOn || !canVibrate()) return;
+  setTimeout(() => {
+    try {
+      navigator.vibrate(pattern);
+    } catch {}
+  }, delay);
+}
+function updateVibrateSwitch() {
+  document.getElementById("vibrate-switch").hidden = !canVibrate();
+  vibrateToggle.checked = vibrateOn;
+}
+vibrateToggle.addEventListener("change", () => {
+  vibrateOn = vibrateToggle.checked;
+  try {
+    localStorage.setItem(VIBRATE_KEY, vibrateOn ? "on" : "off");
+  } catch {}
+  buzz(25); // so you can feel it's on
+});
+updateVibrateSwitch();
+
+// Phones: full screen shows only the maze, with a button under it to leave. Where
+// the browser allows it (not on iPhones), this also hides the browser's own bars.
+const fullScreen = () => document.body.classList.contains("maze-fullscreen");
+let browserFullScreen = false;
+function setFullScreen(on) {
+  if (on === fullScreen()) return;
+  setMenu(false);
+  document.body.classList.toggle("maze-fullscreen", on);
+  if (on) {
+    try {
+      document.documentElement.requestFullscreen({ navigationUI: "hide" })
+        .then(() => (browserFullScreen = true))
+        .catch(() => {});
+    } catch {}
+  } else if (browserFullScreen) {
+    browserFullScreen = false;
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  }
+  requestAnimationFrame(relayout);
+}
+document.getElementById("fullscreen").addEventListener("click", () => setFullScreen(true));
+document.getElementById("exit-fullscreen").addEventListener("click", () => setFullScreen(false));
+// Leaving the browser's full screen another way (e.g. the back gesture) leaves ours too.
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement && browserFullScreen) {
+    browserFullScreen = false;
+    setFullScreen(false);
+  }
+});
+// Tapping anywhere else closes the menu.
+document.addEventListener("pointerdown", (e) => {
+  if (!mobileMenu.hidden && !mobileMenu.contains(e.target) && !menuToggle.contains(e.target)) setMenu(false);
+});
+mobileView.addEventListener("change", () => {
+  if (!mobileView.matches) {
+    setMenu(false);
+    setFullScreen(false);
+  }
+  relayout();
 });
 // The mouse wheel (or a trackpad pinch) over the maze zooms.
 canvas.addEventListener("wheel", (e) => {
@@ -936,20 +1230,56 @@ canvas.addEventListener("wheel", (e) => {
   (e.deltaY < 0 ? zoomIn : zoomOut)();
 }, { passive: false });
 
-// Touch: a swipe runs along the corridor; holding a pad button steps one square
-// at a time, repeating.
+// Touch: a swipe runs along the corridor, two fingers pinch to zoom, and holding
+// a pad button steps one square at a time, repeating.
+const touches = new Map(); // pointer id -> [x, y] for fingers on the maze
 let swipeStart = null;
+let pinch = null; // { distance, path } when two fingers went down
+let pinchFrame = 0;
+const fingerGap = () => {
+  const [[x1, y1], [x2, y2]] = [...touches.values()];
+  return Math.hypot(x2 - x1, y2 - y1);
+};
 canvas.addEventListener("pointerdown", (e) => {
-  if (e.pointerType !== "mouse") swipeStart = [e.clientX, e.clientY];
+  if (e.pointerType === "mouse") return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  try {
+    canvas.setPointerCapture(e.pointerId); // keep getting moves if the finger leaves the maze
+  } catch {}
+  if (touches.size === 1) {
+    swipeStart = [e.clientX, e.clientY];
+  } else if (touches.size === 2 && geo) {
+    swipeStart = null; // a pinch is never a swipe
+    pinch = { distance: Math.max(1, fingerGap()), path: geo.path };
+  }
 });
-canvas.addEventListener("pointerup", (e) => {
-  if (!swipeStart || pauseMenu.open || winMenu.open) return;
+canvas.addEventListener("pointermove", (e) => {
+  if (!touches.has(e.pointerId)) return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (!pinch || touches.size !== 2 || pinchFrame) return;
+  // Zoom at most once per frame; zoomTo keeps the player in view.
+  pinchFrame = requestAnimationFrame(() => {
+    pinchFrame = 0;
+    if (!pinch || touches.size !== 2) return;
+    const path = Math.round((pinch.path * fingerGap()) / pinch.distance);
+    if (path !== geo.path) zoomTo(path);
+  });
+});
+function liftFinger(e) {
+  if (!touches.delete(e.pointerId)) return;
+  if (pinch) {
+    if (!touches.size) pinch = null; // the pinch ends when the last finger lifts
+    return;
+  }
+  if (!swipeStart || e.type !== "pointerup" || pauseMenu.open || winMenu.open) return;
   const dx = e.clientX - swipeStart[0];
   const dy = e.clientY - swipeStart[1];
   swipeStart = null;
   if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return; // a tap, not a swipe
   move(Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0], true);
-});
+}
+canvas.addEventListener("pointerup", liftFinger);
+canvas.addEventListener("pointercancel", liftFinger);
 let repeatTimer = 0;
 const stopRepeat = () => clearTimeout(repeatTimer);
 for (const button of document.querySelectorAll("#dpad button")) {

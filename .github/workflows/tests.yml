@@ -1,0 +1,31 @@
+name: Tests
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  browser-tests:
+    name: Browser tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dpr 1
+            args: --dpr 1
+          - name: dpr 2
+            args: --dpr 2
+          - name: touch screen
+            args: --dpr 3 --mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: browser-actions/setup-firefox@v1
+        with:
+          firefox-version: latest
+      - name: Run the web app's browser tests
+        run: python3 web/tests/run.py ${{ matrix.args }} --browser "$(which firefox)"

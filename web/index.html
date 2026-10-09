@@ -4,6 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Rainbow Maze</title>
+  <!-- Installing to the home screen (runs without the browser's bars). -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Rainbow Maze">
+  <meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#18181b" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7'/%3E%3Cpath d='M6 9h20M6 16h20M6 23h20' stroke-width='5' stroke='%23e63946'/%3E%3Cpath d='M6 16h20' stroke-width='5' stroke='%232fbf71'/%3E%3Cpath d='M6 23h20' stroke-width='5' stroke='%233a6ff7'/%3E%3Ccircle cx='22' cy='9' r='3.2' fill='%23fff' stroke='%23000' stroke-width='1.2'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -156,7 +164,10 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { #building span::before { animation-duration: 3s; } }
     .zoom, .play { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-    .zoom { margin-left: auto; }
+    .view-controls { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-left: auto; }
+    .sound { display: inline-flex; align-items: center; gap: 6px; }
+    #mute { min-width: 44px; padding: 8px 10px; }
+    #volume { width: 90px; accent-color: var(--accent); }
     #route[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
     .zoom button { min-width: 40px; padding: 8px 10px; }
     button:disabled { opacity: 0.5; cursor: default; }
@@ -188,6 +199,74 @@
     }
     @media (pointer: coarse) { #dpad { display: grid; } }
     #dpad button { padding: 0; font-size: 1.5rem; }
+    #menu-toggle, .mobile-only { display: none; }
+    #mobile-menu {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+      background: var(--panel); border-top: 1px solid var(--border);
+      box-shadow: 0 -4px 16px rgb(0 0 0 / 0.15);
+    }
+    #mobile-menu[hidden] { display: none; }
+    #mobile-menu button, .pad-switch { min-height: 48px; }
+    #mobile-menu { max-height: 80dvh; overflow-y: auto; }
+    .menu-row, .menu-wide { grid-column: 1 / -1; }
+    .menu-row { display: flex; align-items: center; gap: 8px; }
+    .menu-row button { flex: 1; }
+    .menu-row input[type=range] { flex: 3; accent-color: var(--accent); }
+    #m-info { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .menu-tip { margin: 0; color: var(--muted); font-size: 0.875rem; }
+    #fullscreen, #exit-fullscreen { display: none; }
+    .play-area { display: contents; }
+    #map-show {
+      position: absolute; top: 16px; right: 16px; padding: 6px 10px;
+      box-shadow: 0 1px 6px rgb(0 0 0 / 0.4);
+    }
+    #map-show[hidden], #vibrate-switch[hidden] { display: none; }
+    .menu-row .pad-switch { flex: 2; }
+    /* Touch screens held sideways: the arrow pad goes beside the maze, not under it. */
+    @media (pointer: coarse) and (orientation: landscape) {
+      .play-area { display: flex; align-items: center; justify-content: flex-start; gap: 16px; }
+      .play-area #dpad { margin-top: 0; }
+    }
+    .pad-switch {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      border: 1px solid var(--border); border-radius: 8px; font-weight: 600;
+    }
+    .pad-switch input { width: 20px; height: 20px; accent-color: var(--accent); }
+    #m-route[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    /* Phones: a touch screen that is narrow, or short (landscape). Keep in sync with
+       MOBILE_VIEW in app.js. Tablets and desktops keep the full toolbar. */
+    @media (pointer: coarse) and (max-width: 760px), (pointer: coarse) and (max-height: 500px) {
+      #menu-toggle { display: inline-flex; }
+      .play #undo, .play #restart, .play #route { display: none; }
+      body:not(.show-pad) #dpad { display: none; }
+      .hint .touch-only { display: none; }
+      .hint .mobile-only { display: initial; }
+
+      /* A compact header: one row of buttons and one line of status, so the maze
+         gets most of the screen. Everything else is in the menu. */
+      main:has(> #maze:not([hidden])) { padding: 8px 0 0; }
+      #maze > .toolbar { padding: 0 8px; margin-bottom: 6px; flex-wrap: nowrap; }
+      #back, #again, .view-controls, #info, #maze .hint { display: none; }
+      #fullscreen { display: inline-flex; margin-left: auto; order: 1; }
+      #status { flex-wrap: nowrap; gap: 12px; padding: 0 8px; margin: 0; font-size: 0.9rem; white-space: nowrap; }
+      #status .walks { display: none; }
+      #message { min-height: 1.3em; margin: 2px 8px 4px; font-size: 0.85rem; }
+      #stage { padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; margin: 0 auto; }
+      #building { border-radius: 0; }
+      /* A smaller minimap; tap it to fold it away to a Map button. */
+      #minimap { pointer-events: auto; cursor: pointer; }
+
+      /* Full screen: only the maze, and a button under it to leave. */
+      body.maze-fullscreen main:has(> #maze) { padding: 0; max-width: none; } /* beats the compact header's padding */
+      body.maze-fullscreen #maze > :not(.play-area):not(#exit-fullscreen),
+      body.maze-fullscreen .play-area > :not(#stage) { display: none !important; }
+      body.maze-fullscreen #exit-fullscreen {
+        display: block; width: calc(100% - 16px); min-height: 48px;
+        margin: 8px auto max(8px, env(safe-area-inset-bottom));
+      }
+    }
     #dpad [data-dir=ArrowUp] { grid-area: 1 / 2; }
     #dpad [data-dir=ArrowLeft] { grid-area: 2 / 1; }
     #dpad [data-dir=ArrowRight] { grid-area: 2 / 3; }
@@ -275,6 +354,9 @@
       <div class="toolbar">
         <button id="back" type="button">← Change settings</button>
         <button id="again" class="primary" type="button">New maze</button>
+        <!-- Phones only (see the mobile media query): undo, restart, route and the arrow pad live here. -->
+        <button id="menu-toggle" type="button" aria-expanded="false" aria-controls="mobile-menu">☰ Menu</button>
+        <button id="fullscreen" type="button" title="Show only the maze">⛶ Full screen</button>
         <!-- TODO: hidden until it becomes "save game" (see the note in app.js). -->
         <button id="download" type="button" hidden>Download JSON</button>
         <span class="play" role="group" aria-label="Play">
@@ -283,30 +365,63 @@
           <button id="hint" type="button" title="Show the next few squares (H)">Hint</button>
           <button id="route" type="button" aria-pressed="false" title="Show or hide the way to the end (Shift + H)">Show route</button>
         </span>
-        <span class="zoom" role="group" aria-label="Zoom">
-          <button id="zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
-          <button id="zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
-          <button id="zoom-fit" type="button" title="Show the whole maze (0)">Fit</button>
+        <span class="view-controls">
+          <span class="sound" role="group" aria-label="Sound">
+            <button id="mute" type="button" aria-pressed="true" aria-label="Sound off" title="Sound off (M)">🔇</button>
+            <input id="volume" type="range" min="0" max="100" step="5" value="60" aria-label="Volume" title="Volume">
+          </span>
+          <span class="zoom" role="group" aria-label="Zoom">
+            <button id="zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
+            <button id="zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
+            <button id="zoom-fit" type="button" title="Show the whole maze (0)">Fit</button>
+          </span>
         </span>
       </div>
       <div id="info"></div>
       <p class="hint">
-        <span class="keys-only">Move with <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · hold <kbd>Shift</kbd> to run to the next turn-off · <kbd>Z</kbd> undo · <kbd>R</kbd> restart · <kbd>H</kbd> hint · <kbd>Shift</kbd>+<kbd>H</kbd> route · <kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd> or the mouse wheel to zoom · <kbd>Esc</kbd> for menu</span>
-        <span class="touch-only">Swipe to run to the next turn-off, or use the arrows below to step</span>
+        <span class="keys-only">Move with <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · hold <kbd>Shift</kbd> to run to the next turn-off · <kbd>Z</kbd> undo · <kbd>R</kbd> restart · <kbd>H</kbd> hint · <kbd>Shift</kbd>+<kbd>H</kbd> route · <kbd>M</kbd> sound · <kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd> or the mouse wheel to zoom · <kbd>Esc</kbd> for menu</span>
+        <span class="touch-only">Swipe to run to the next turn-off, use the arrows below to step, and pinch to zoom</span>
+        <span class="mobile-only">Swipe to run to the next turn-off and pinch to zoom. The menu has undo, restart, the route and an arrow pad.</span>
       </p>
       <div id="status"></div>
       <p id="message" role="status" aria-live="polite"></p>
-      <div id="stage">
-        <canvas id="canvas"></canvas>
-        <canvas id="minimap" hidden aria-hidden="true"></canvas>
-        <div id="building" hidden role="status"><span>Building maze…</span></div>
+      <!-- The maze and the arrow pad: below each other, or side by side on touch
+           screens held sideways (see .play-area). -->
+      <div class="play-area">
+        <div id="stage">
+          <canvas id="canvas"></canvas>
+          <canvas id="minimap" hidden aria-hidden="true"></canvas>
+          <button id="map-show" type="button" hidden aria-label="Show the map">🗺 Map</button>
+          <div id="building" hidden role="status"><span>Building maze…</span></div>
+        </div>
+        <div id="dpad" aria-label="Move">
+          <button type="button" data-dir="ArrowUp" aria-label="Up">↑</button>
+          <button type="button" data-dir="ArrowLeft" aria-label="Left">←</button>
+          <button type="button" data-dir="ArrowRight" aria-label="Right">→</button>
+          <button type="button" data-dir="ArrowDown" aria-label="Down">↓</button>
+        </div>
       </div>
-      <div id="dpad" aria-label="Move">
-        <button type="button" data-dir="ArrowUp" aria-label="Up">↑</button>
-        <button type="button" data-dir="ArrowLeft" aria-label="Left">←</button>
-        <button type="button" data-dir="ArrowRight" aria-label="Right">→</button>
-        <button type="button" data-dir="ArrowDown" aria-label="Down">↓</button>
+      <div id="mobile-menu" hidden role="group" aria-label="Game menu">
+        <label class="pad-switch"><input id="pad-toggle" type="checkbox" role="switch"> Arrow pad</label>
+        <button id="m-undo" type="button">↶ Undo</button>
+        <button id="m-restart" type="button">Restart</button>
+        <button id="m-route" type="button" aria-pressed="false">Show route</button>
+        <button id="m-new" class="primary" type="button">New maze</button>
+        <button id="m-settings" type="button">← Change settings</button>
+        <div class="menu-row" role="group" aria-label="Sound">
+          <button id="m-mute" type="button" aria-label="Sound off">🔇</button>
+          <input id="m-volume" type="range" min="0" max="100" step="5" value="60" aria-label="Volume">
+          <label id="vibrate-switch" class="pad-switch" hidden><input id="vibrate-toggle" type="checkbox" role="switch"> Vibrate</label>
+        </div>
+        <div class="menu-row" role="group" aria-label="Zoom">
+          <button id="m-zoom-out" type="button" aria-label="Zoom out">−</button>
+          <button id="m-zoom-in" type="button" aria-label="Zoom in">+</button>
+          <button id="m-zoom-fit" type="button">Fit</button>
+        </div>
+        <div id="m-info" class="menu-wide"></div>
+        <p class="menu-wide menu-tip">Swipe to run to the next turn-off and pinch to zoom.</p>
       </div>
+      <button id="exit-fullscreen" type="button">✕ Exit full screen</button>
     </section>
   </main>
 
