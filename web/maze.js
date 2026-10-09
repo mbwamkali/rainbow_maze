@@ -50,6 +50,8 @@ const MIN_SIZE = 5;
 const MIN_SIZE_FOR_COLORS = { 1: 5, 2: 5, 3: 9, 4: 15, 5: 21, 6: 25, 7: 31 };
 const MAX_SIZE = 250;
 
+// TODO: seeded randomness (?seed=…) so a maze can be replayed and shared. Every
+// random draw goes through Math.random, here and in the region layouts below.
 function choice(items) {
   return items[Math.floor(Math.random() * items.length)];
 }

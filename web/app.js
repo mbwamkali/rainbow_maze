@@ -9,7 +9,11 @@ const colorsHint = document.getElementById("colors-hint");
 const layoutInput = document.getElementById("layout");
 const layoutHint = document.getElementById("layout-hint");
 const error = document.getElementById("error");
+const stage = document.getElementById("stage");
 const canvas = document.getElementById("canvas");
+const minimap = document.getElementById("minimap");
+const buildingNote = document.getElementById("building");
+const dpad = document.getElementById("dpad");
 const info = document.getElementById("info");
 const statusLabel = document.getElementById("status");
 const message = document.getElementById("message");
@@ -34,15 +38,28 @@ const LAYOUT_HINTS = {
   tendrils: "Colors wind through each other along the solution; hardest to read",
 };
 
+// Passage widths in CSS pixels. New mazes open zoomed in to COMFORT_PATH when the
+// whole maze would be smaller than that; zooming goes from "fit" up to MAX_PATH.
+const COMFORT_PATH = 20;
+const MAX_PATH = 64;
+const ZOOM_STEP = 1.5;
+
 let current = null;
 let player = null; // [row, col], always a passage square (odd row and column)
 let playerColor = "WHITE";
 let flashTick = 0;
 let moves = 0;
 let solved = false;
-let geo = null; // row/column sizes, see geometry()
+let geo = null; // row/column sizes at the current zoom, see geometry()
+let fitPath = 0; // passage width (device pixels) that fits the whole maze on screen
+let view = { x: 0, y: 0, w: 0, h: 0 }; // the part of the maze on the canvas, in device pixels
+let minimapBase = null; // the whole maze at one pixel per square
 let anim = null; // the smiley's current slide or bump, see animate()
 let messageTimer = 0;
+let building = false;
+let buildId = 0;
+let activeWorker = null;
+let workerBroken = false;
 
 sizeInput.max = MAX_SIZE;
 colorsInput.max = MAX_COLORS;
@@ -61,15 +78,72 @@ layoutInput.addEventListener("change", updateLayoutHint);
 updateLayoutHint();
 updateHint();
 
-function generate() {
+// Build in a Web Worker so big mazes don't freeze the page. If workers aren't
+// allowed here (some sandboxed pages), build on the main thread instead, after a
+// short pause so the "Building maze…" note gets painted first.
+function buildMaze(colors, size, style) {
+  return new Promise((resolve, reject) => {
+    const onMainThread = () =>
+      setTimeout(() => {
+        try {
+          resolve(buildGrid(colors, size, style));
+        } catch (e) {
+          reject(e);
+        }
+      }, 50);
+    if (workerBroken) return onMainThread();
+    let worker;
+    try {
+      worker = new Worker("worker.js");
+    } catch {
+      workerBroken = true;
+      return onMainThread();
+    }
+    activeWorker = worker;
+    worker.onmessage = ({ data }) => {
+      worker.terminate();
+      if (data.error) reject(new Error(data.error));
+      else resolve(data.result);
+    };
+    worker.onerror = (e) => {
+      // buildGrid's own errors come back as messages, so this means the worker couldn't load.
+      e.preventDefault();
+      worker.terminate();
+      workerBroken = true;
+      onMainThread();
+    };
+    worker.postMessage({ colors, size, style });
+  });
+}
+
+function setBuilding(on) {
+  building = on;
+  buildingNote.hidden = !on;
+  stage.classList.toggle("busy", on);
+  for (const id of ["again", "download"]) document.getElementById(id).disabled = on;
+}
+
+async function generate() {
+  if (building) return;
+  const id = ++buildId;
   const size = Number(sizeInput.value);
   const colors = Number(colorsInput.value);
+  const style = layoutInput.value;
+  finishAnimation();
+  setBuilding(true);
+  let result;
   try {
-    current = buildGrid(colors, size, layoutInput.value);
+    result = await buildMaze(colors, size, style);
   } catch (e) {
+    if (id !== buildId) return;
+    setBuilding(false);
     error.textContent = e.message;
-    return false;
+    show(setupScreen);
+    return;
   }
+  if (id !== buildId) return; // abandoned via the main menu
+  setBuilding(false);
+  current = result;
   error.textContent = "";
   player = corners(size)[0];
   playerColor = "WHITE";
@@ -78,7 +152,6 @@ function generate() {
   anim = null;
   showMessage("");
   updateStatus();
-  draw();
   // Colors in the order the regions come, from start to end.
   info.innerHTML = "";
   for (const name of current.palette) {
@@ -89,30 +162,157 @@ function generate() {
   }
   const length = document.createElement("span");
   length.className = "meta";
-  length.textContent = `${size}×${size} · ${layoutInput.value} · shortest route ${shortestMoves()} moves`;
+  length.textContent = `${size}×${size} · ${style} · shortest route ${shortestMoves()} moves`;
   info.append(length);
-  return true;
+  minimapBase = drawMinimapBase(current.grid);
+  layoutView(null);
+  centerOn(...geo.center(...player));
+  paint();
 }
 
 // The solution path steps through the thin squares between passages too; a
 // move goes from one passage square to the next, so it covers two of those.
 const shortestMoves = () => (current.path.length - 1) / 2;
 
-// Fit the maze to the available space, with passages at least 4px wide. Sizes
-// are in device pixels so the maze stays sharp on high-DPI screens.
-function draw() {
-  if (!current) return;
-  finishAnimation();
+// Size the canvas to the space left on screen and pick the passage width.
+// `path` is the wanted passage width in device pixels, or null for a new maze's
+// default: the whole maze if that's comfortable to play, else zoomed in.
+// All sizes are in device pixels so the maze stays sharp on high-DPI screens.
+function layoutView(path) {
   const size = visibleSize(current.grid);
   const dpr = window.devicePixelRatio || 1;
-  const reserved = touchControls.matches ? 330 : 190; // toolbar, status, and the touch pad
-  const room = Math.max(100, Math.min(mazeScreen.clientWidth - 32, window.innerHeight - reserved)) * dpr;
-  let path = Math.max(4, Math.floor((room * 1.6) / size));
-  while (path > 4 && geometry(path, dpr).pos(size) > room) path--;
-  geo = geometry(path, dpr);
-  render(current.grid, canvas, geo, flashTick);
-  drawPlayer(canvas.getContext("2d"), ...player, geo, playerColor);
+  const top = stage.getBoundingClientRect().top + window.scrollY;
+  const below = touchControls.matches ? dpad.offsetHeight + 32 : 16;
+  const roomW = Math.max(160, mazeScreen.clientWidth) * dpr;
+  const roomH = Math.max(160, window.innerHeight - top - below) * dpr;
+  const room = Math.min(roomW, roomH);
+  fitPath = Math.max(2, Math.floor((room * 1.6) / size));
+  while (fitPath > 2 && geometry(fitPath, dpr).pos(size) > room) fitPath--;
+  if (path === null) path = Math.max(fitPath, Math.round(COMFORT_PATH * dpr));
+  geo = geometry(Math.min(Math.max(path, fitPath), Math.round(MAX_PATH * dpr)), dpr);
+  const mazePx = geo.pos(size);
+  view.w = Math.floor(Math.min(mazePx, roomW));
+  view.h = Math.floor(Math.min(mazePx, roomH));
+  canvas.width = view.w;
+  canvas.height = view.h;
+  canvas.style.width = `${view.w / dpr}px`;
+  canvas.style.height = `${view.h / dpr}px`;
 }
+
+function clampView() {
+  const mazePx = geo.pos(visibleSize(current.grid));
+  view.x = Math.round(Math.min(Math.max(view.x, 0), mazePx - view.w));
+  view.y = Math.round(Math.min(Math.max(view.y, 0), mazePx - view.h));
+}
+
+function centerOn(x, y) {
+  view.x = x - view.w / 2;
+  view.y = y - view.h / 2;
+  clampView();
+}
+
+// Keep the point (x, y) away from the canvas edges: the view only moves once the
+// smiley gets within 30% of an edge. Returns whether the view moved.
+function follow(x, y) {
+  const { x: oldX, y: oldY } = view;
+  const mx = view.w * 0.3;
+  const my = view.h * 0.3;
+  if (x - view.x < mx) view.x = x - mx;
+  if (x - view.x > view.w - mx) view.x = x - (view.w - mx);
+  if (y - view.y < my) view.y = y - my;
+  if (y - view.y > view.h - my) view.y = y - (view.h - my);
+  clampView();
+  return view.x !== oldX || view.y !== oldY;
+}
+
+// The row/column under device-pixel offset `px` (inverse of geo.pos).
+function indexAt(px) {
+  const pair = geo.path + geo.wall;
+  const n = Math.floor(px / pair);
+  return Math.min(visibleSize(current.grid) - 1, Math.max(0, 2 * n + (px - n * pair >= geo.wall ? 1 : 0)));
+}
+
+// Redraw every square in view (but not the player). The canvas keeps a
+// translation by the view offset, so everything else draws in maze coordinates.
+function paintSquares() {
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "black";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(1, 0, 0, 1, -view.x, -view.y);
+  const [r0, r1] = [indexAt(view.y), indexAt(view.y + view.h - 1)];
+  const [c0, c1] = [indexAt(view.x), indexAt(view.x + view.w - 1)];
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) drawCell(ctx, current.grid, r, c, geo, flashTick);
+}
+
+function paint() {
+  if (!current) return;
+  paintSquares();
+  if (!anim) drawPlayer(canvas.getContext("2d"), ...player, geo, playerColor);
+  updateMinimap();
+}
+
+// The whole maze at one pixel per square, drawn once per maze.
+function drawMinimapBase(grid) {
+  const size = visibleSize(grid);
+  const base = document.createElement("canvas");
+  base.width = base.height = size;
+  const ctx = base.getContext("2d");
+  const image = ctx.createImageData(size, size);
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const value = grid[r][c];
+      const hex = value === WALL ? "#000000" : value === COLOR_CHANGE ? "#808080" : RGB[colorOf(value)];
+      const k = 4 * (r * size + c);
+      for (let ch = 0; ch < 3; ch++) image.data[k + ch] = parseInt(hex.slice(1 + 2 * ch, 3 + 2 * ch), 16);
+      image.data[k + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  return base;
+}
+
+// When zoomed in, show the whole maze in a corner with the visible part outlined.
+function updateMinimap() {
+  const size = visibleSize(current.grid);
+  const mazePx = geo.pos(size);
+  const zoomed = mazePx > view.w || mazePx > view.h;
+  minimap.hidden = !zoomed;
+  if (!zoomed) return;
+  const dpr = geo.dpr;
+  const side = Math.round(Math.min(160, view.w / dpr / 3, view.h / dpr / 3) * dpr);
+  if (minimap.width !== side) {
+    minimap.width = minimap.height = side;
+    minimap.style.width = minimap.style.height = `${side / dpr}px`;
+  }
+  const ctx = minimap.getContext("2d");
+  ctx.imageSmoothingEnabled = side < size;
+  ctx.drawImage(minimapBase, 0, 0, side, side);
+  const scale = side / mazePx;
+  ctx.lineWidth = Math.max(1, dpr * 1.5);
+  ctx.strokeStyle = "#2563eb";
+  ctx.strokeRect(view.x * scale, view.y * scale, view.w * scale, view.h * scale);
+  const [x, y] = geo.center(...player);
+  ctx.beginPath();
+  ctx.arc(x * scale, y * scale, Math.max(2.5 * dpr, side / 40), 0, 2 * Math.PI);
+  ctx.fillStyle = RGB[playerColor];
+  ctx.fill();
+  ctx.lineWidth = dpr;
+  ctx.strokeStyle = "black";
+  ctx.stroke();
+}
+
+// Change the passage width (device pixels), keeping the player in view.
+function zoomTo(path) {
+  if (!current || building) return;
+  finishAnimation();
+  layoutView(path);
+  centerOn(...geo.center(...player));
+  paint();
+}
+const zoomIn = () => geo && zoomTo(Math.round(geo.path * ZOOM_STEP));
+const zoomOut = () => geo && zoomTo(Math.round(geo.path / ZOOM_STEP));
+const zoomFit = () => zoomTo(fitPath);
 
 const title = (color) => color[0] + color.slice(1).toLowerCase();
 const swatch = (color) => `<i class="swatch" style="background:${RGB[color]}" title="${title(color)}"></i>`;
@@ -134,17 +334,16 @@ function showMessage(text) {
 }
 
 // Why the player can't step onto `target`, or "" for plain walls.
-function blockedReason(target) {
+function blockedReason(color, target) {
   if (target === WALL || target === undefined) return "";
-  const color = colorOf(target);
-  if (playerColor === "WHITE") return `White can only walk on white. Find a flashing doorway to take on a color.`;
-  return `${title(playerColor)} can't walk on ${color.toLowerCase()}.`;
+  if (color === "WHITE") return `White can only walk on white. Find a flashing doorway to take on a color.`;
+  return `${title(color)} can't walk on ${colorOf(target).toLowerCase()}.`;
 }
 
 // Flash the COLOR_CHANGE squares by redrawing just those, then the player on top
 // in case their face spills onto one.
 setInterval(() => {
-  if (!current || mazeScreen.hidden) return;
+  if (!current || mazeScreen.hidden || building) return;
   flashTick++;
   const ctx = canvas.getContext("2d");
   for (const [r, c] of current.changers) drawCell(ctx, current.grid, r, c, geo, flashTick);
@@ -161,48 +360,74 @@ const DIRECTIONS = {
   a: [0, -1],
   d: [0, 1],
 };
+const DIRECTION_LIST = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
-// Move to the next passage square, through the thin square in between, if the
-// player's color allows both steps. Stepping off a COLOR_CHANGE square takes on
-// the color of the next square. A blocked move bumps the smiley and says why.
-function move([dr, dc]) {
-  if (solved) return;
-  finishAnimation();
+// One move from passage square `at` in direction [dr, dc], through the thin
+// square in between, for a player of color `color`. Returns the squares and the
+// colors after each, or {blocked: reason} if the color rules don't allow it.
+// Stepping off a COLOR_CHANGE square takes on the color of the next square.
+function tryMove(at, color, [dr, dc]) {
   const grid = current.grid;
-  const [r, c] = player;
-  const mid = [r + dr, c + dc];
-  const next = [r + 2 * dr, c + 2 * dc];
+  const mid = [at[0] + dr, at[1] + dc];
+  const next = [at[0] + 2 * dr, at[1] + 2 * dc];
   const midSquare = grid[mid[0]]?.[mid[1]];
   const nextSquare = grid[next[0]]?.[next[1]];
-  const midColor = midSquare === undefined ? null : step(playerColor, grid[r][c], midSquare);
-  const nextColor = midColor && nextSquare !== undefined ? step(midColor, midSquare, nextSquare) : null;
-  if (!nextColor) {
-    showMessage(blockedReason(midColor ? nextSquare : midSquare));
-    animate({ from: player, to: player, toward: [dr, dc], color: playerColor, cells: [player, mid], bump: true });
+  const midColor = midSquare === undefined ? null : step(color, grid[at[0]][at[1]], midSquare);
+  if (!midColor) return { blocked: blockedReason(color, midSquare), mid };
+  const nextColor = nextSquare === undefined ? null : step(midColor, midSquare, nextSquare);
+  if (!nextColor) return { blocked: blockedReason(midColor, nextSquare), mid };
+  return { mid, next, midColor, nextColor };
+}
+
+// Move one square, or with `run`, keep going along the corridor (round bends)
+// until a junction, a dead end, a color change, or the end. A blocked first
+// move bumps the smiley and says why.
+function move(dir, run = false) {
+  if (solved || building || !current) return;
+  finishAnimation();
+  const first = tryMove(player, playerColor, dir);
+  if (first.blocked !== undefined) {
+    showMessage(first.blocked);
+    animate({ cells: [player, first.mid], points: [player], fills: [playerColor], toward: dir, bump: true });
     return;
   }
   showMessage("");
-  animate({ from: player, to: next, color: nextColor, cells: [player, mid, next] });
-  player = next;
-  playerColor = nextColor;
-  moves++;
+  const cells = [player];
+  const fills = [playerColor];
+  let [at, color, heading, steps] = [player, playerColor, dir, 0];
+  for (let m = first; ; ) {
+    cells.push(m.mid, m.next);
+    fills.push(m.midColor, m.nextColor);
+    steps++;
+    const changed = m.nextColor !== color;
+    [at, color] = [m.next, m.nextColor];
+    if (!run || changed || current.grid[at[0]][at[1]].marker === END || steps >= 500) break;
+    // Only open, walkable ways out count; the way back doesn't.
+    const ways = DIRECTION_LIST.filter(([dr, dc]) => !(dr === -heading[0] && dc === -heading[1]))
+      .map((d) => ({ d, m: tryMove(at, color, d) }))
+      .filter(({ m: way }) => way.blocked === undefined);
+    if (ways.length !== 1) break;
+    [heading, m] = [ways[0].d, ways[0].m];
+  }
+  animate({ cells, points: cells, fills, toward: dir, steps });
+  player = at;
+  playerColor = color;
+  moves += steps;
   updateStatus();
-  if (nextSquare.marker === END) solved = true;
+  if (current.grid[at[0]][at[1]].marker === END) solved = true;
 }
 
-// Slide the smiley between squares (or bump it toward a wall and back), blending
-// to its new color. Each frame redraws only the squares it passes over.
-function animate({ from, to, toward = [0, 0], color, cells, bump = false }) {
+// Slide the smiley through `points` (squares), blending between `fills` (colors),
+// or bump it toward `toward` and back. Each frame redraws only `cells`, unless the
+// view has to scroll to keep up, and then it redraws everything in view.
+function animate({ cells, points, fills, toward, bump = false, steps = 1 }) {
   anim = {
     start: performance.now(),
-    duration: reducedMotion.matches ? 0 : bump ? 160 : 90,
-    from: geo.center(...from),
-    to: geo.center(...to),
-    toward,
-    fromFill: RGB[anim?.color ?? playerColor],
-    toFill: RGB[color],
-    color,
+    duration: reducedMotion.matches ? 0 : bump ? 160 : Math.min(90 + (steps - 1) * 45, 900),
     cells,
+    points: points.map((p) => geo.center(...p)),
+    fills: fills.map((color) => RGB[color]),
+    toward,
     bump,
   };
   requestAnimationFrame(frame);
@@ -210,28 +435,44 @@ function animate({ from, to, toward = [0, 0], color, cells, bump = false }) {
 
 function frame(now) {
   if (!anim) return;
-  const t = anim.duration ? Math.min(1, (now - anim.start) / anim.duration) : 1;
-  const ctx = canvas.getContext("2d");
-  for (const [r, c] of anim.cells) drawCell(ctx, current.grid, r, c, geo, flashTick);
+  // A frame's timestamp is when the browser started the frame, which can be a
+  // moment before the key press that started this animation, so clamp at 0.
+  const t = anim.duration ? Math.min(1, Math.max(0, (now - anim.start) / anim.duration)) : 1;
   const ease = 1 - (1 - t) ** 3;
-  let [x, y] = anim.from.map((v, k) => v + (anim.to[k] - v) * ease);
+  const last = anim.points.length - 1;
+  const u = ease * last;
+  const i = Math.min(Math.floor(u), Math.max(0, last - 1));
+  const f = last ? u - i : 0;
+  const a = anim.points[i];
+  const b = anim.points[Math.min(i + 1, last)];
+  let x = a[0] + (b[0] - a[0]) * f;
+  let y = a[1] + (b[1] - a[1]) * f;
+  const fill = mixColor(anim.fills[i], anim.fills[Math.min(i + 1, last)], f);
   if (anim.bump) {
     const push = Math.sin(Math.PI * t) * geo.path * 0.15; // out and back
     x += anim.toward[1] * push;
     y += anim.toward[0] * push;
+  }
+  const ctx = canvas.getContext("2d");
+  if (follow(x, y)) {
+    paintSquares();
+    updateMinimap();
+  } else {
+    for (const [r, c] of anim.cells) drawCell(ctx, current.grid, r, c, geo, flashTick);
   }
   // Only paint inside the squares just redrawn, so no part of the face is left behind.
   ctx.save();
   ctx.beginPath();
   for (const [r, c] of anim.cells) ctx.rect(geo.pos(c), geo.pos(r), geo.span(c), geo.span(r));
   ctx.clip();
-  drawPlayerAt(ctx, x, y, geo, mixColor(anim.fromFill, anim.toFill, ease), anim.bump && t < 1 ? "oops" : "happy");
+  drawPlayerAt(ctx, x, y, geo, fill, anim.bump && t < 1 ? "oops" : "happy");
   ctx.restore();
   if (t < 1) {
     requestAnimationFrame(frame);
     return;
   }
   anim = null;
+  updateMinimap();
   if (solved && !winMenu.open) {
     document.getElementById("win-text").textContent =
       `You reached the end in ${moves} moves. The shortest route is ${shortestMoves()} moves.`;
@@ -249,6 +490,11 @@ function finishAnimation() {
 function mainMenu() {
   pauseMenu.close();
   winMenu.close();
+  if (building) {
+    buildId++; // drop the maze being built
+    activeWorker?.terminate();
+    setBuilding(false);
+  }
   show(setupScreen);
 }
 
@@ -260,7 +506,7 @@ function show(screen) {
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   show(mazeScreen);
-  if (!generate()) show(setupScreen);
+  generate();
 });
 document.getElementById("again").addEventListener("click", (e) => {
   e.currentTarget.blur(); // so Enter/Space don't keep regenerating while playing
@@ -274,17 +520,27 @@ document.getElementById("win-again").addEventListener("click", () => {
   generate();
 });
 document.getElementById("win-main").addEventListener("click", mainMenu);
+document.getElementById("zoom-in").addEventListener("click", zoomIn);
+document.getElementById("zoom-out").addEventListener("click", zoomOut);
+document.getElementById("zoom-fit").addEventListener("click", zoomFit);
+
+const ZOOM_KEYS = { "+": zoomIn, "=": zoomIn, "-": zoomOut, _: zoomOut, 0: zoomFit };
 
 window.addEventListener("keydown", (e) => {
   // Open dialogs handle their own keys; Esc closes them (i.e. resumes) natively.
   if (mazeScreen.hidden || pauseMenu.open || winMenu.open) return;
+  const dir = DIRECTIONS[e.key] || DIRECTIONS[e.key.toLowerCase()];
   if (e.key === "Escape") {
     e.preventDefault();
     pauseMenu.showModal();
-  } else if (DIRECTIONS[e.key] || DIRECTIONS[e.key.toLowerCase()]) {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+  } else if (e.ctrlKey || e.metaKey || e.altKey) {
+    return; // leave browser shortcuts (and browser zoom) alone
+  } else if (dir) {
     e.preventDefault(); // don't scroll the page
-    move(DIRECTIONS[e.key] || DIRECTIONS[e.key.toLowerCase()]);
+    move(dir, e.shiftKey);
+  } else if (ZOOM_KEYS[e.key]) {
+    e.preventDefault();
+    ZOOM_KEYS[e.key]();
   }
 });
 document.getElementById("download").addEventListener("click", () => {
@@ -295,9 +551,22 @@ document.getElementById("download").addEventListener("click", () => {
   link.click();
   URL.revokeObjectURL(link.href);
 });
-window.addEventListener("resize", draw);
+window.addEventListener("resize", () => {
+  if (!current || mazeScreen.hidden || building) return;
+  finishAnimation();
+  const ratio = geo.path / fitPath; // keep the same zoom relative to "fit"
+  layoutView(null);
+  zoomTo(Math.round(fitPath * ratio));
+});
+// The mouse wheel (or a trackpad pinch) over the maze zooms.
+canvas.addEventListener("wheel", (e) => {
+  if (!current) return;
+  e.preventDefault();
+  (e.deltaY < 0 ? zoomIn : zoomOut)();
+}, { passive: false });
 
-// Touch: swipe on the maze, or hold a button on the direction pad to keep moving.
+// Touch: a swipe runs along the corridor; holding a pad button steps one square
+// at a time, repeating.
 let swipeStart = null;
 canvas.addEventListener("pointerdown", (e) => {
   if (e.pointerType !== "mouse") swipeStart = [e.clientX, e.clientY];
@@ -308,7 +577,7 @@ canvas.addEventListener("pointerup", (e) => {
   const dy = e.clientY - swipeStart[1];
   swipeStart = null;
   if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return; // a tap, not a swipe
-  move(Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0]);
+  move(Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0], true);
 });
 let repeatTimer = 0;
 const stopRepeat = () => clearTimeout(repeatTimer);
